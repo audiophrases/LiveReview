@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Review — every game reviewed the moment it ends</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%93%A1%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script src="libs/chess.min.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+
+<header class="app">
+  <div class="logo" aria-hidden="true">📡</div>
+  <div>
+    <div class="title">Live <span>Review</span></div>
+    <div class="subtitle">every game reviewed the moment it ends</div>
+  </div>
+  <div class="acct" id="acct" hidden>
+    <button type="button" class="btn" id="changeBtn" title="Watch somebody else">Change player</button>
+  </div>
+</header>
+
+<section class="card setup" id="setup">
+  <h2>Whose games are we watching?</h2>
+  <p class="lede">Play on Chess.com as you always do. The moment a game ends, it opens here
+    already being reviewed — board, advantage bar and a verdict on every move — while you
+    still remember what you were thinking.</p>
+  <form class="row" id="watchForm" autocomplete="off">
+    <input class="text" id="username" placeholder="Chess.com username" spellcheck="false" required>
+    <button class="btn primary" type="submit" id="watchBtn">Start watching</button>
+  </form>
+  <div class="err" id="setupErr" role="alert" hidden></div>
+  <label class="check"><input type="checkbox" id="guessOpt" checked>
+    <span><b>Guess first.</b> Before the engine speaks, point at the move you think lost the thread.
+    Knowing when you have gone wrong is the skill you need at the board.</span></label>
+  <label class="check"><input type="checkbox" id="notifyOpt">
+    <span><b>Tell me when a review is ready,</b> even while this tab is in the background.</span></label>
+  <details class="why">
+    <summary>Why after the game, and not during it?</summary>
+    <p>Chess.com does not show a game in progress to outside apps, and that is on purpose. An
+      advantage bar or a "that was a mistake" during your own game is engine help under
+      Chess.com's Fair Play rules, even with no best move on screen. A bar that jumps to +4 after
+      your opponent's move tells you there is a winning shot. So the review arrives the instant
+      the game is over, which is the earliest point it can be fair.</p>
+    <p>Every move in the review shows the engine's top three moves from the position it was
+      played in, with the move actually played marked among them. That is a fair way to learn
+      from a move once the game is over. During a game it is not: the best moves you could have
+      played last turn, and what each was worth, tell you what the position on the board holds now.</p>
+    <p>For feedback move by move while you play, practise against the engine, where help is
+      allowed: <b>Play</b> and <b>Spar</b> in the bar above both have an advantage bar.</p>
+  </details>
+</section>
+
+<section id="main" hidden>
+  <div class="card status" id="statusCard">
+    <span class="pulse" id="pulse" aria-hidden="true"></span>
+    <div class="status-text">
+      <div id="statusMain"></div>
+      <div class="muted small" id="statusSub" aria-live="polite"></div>
+    </div>
+    <div class="status-actions">
+      <button type="button" class="btn" id="pauseBtn">Pause</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="boardcol">
+      <div class="player" id="playerTop"></div>
+      <div class="boardrow">
+        <div class="evalbar" id="evalbar" title="Advantage bar: White's winning chances, from the engine">
+          <div class="fill" id="evalFill"></div>
+          <span class="evaltxt" id="evalTxt"></span>
+        </div>
+        <div class="boardwrap">
+          <div class="board" id="board" aria-label="Board"></div>
+          <svg class="arrows" id="arrows" viewBox="0 0 8 8" aria-hidden="true">
+            <defs>
+              <marker id="ah-better" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="2.6" markerHeight="2.6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#57c98a"/></marker>
+              <marker id="ah-punish" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="2.6" markerHeight="2.6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4fd1c5"/></marker>
+            </defs>
+          </svg>
+        </div>
+      </div>
+      <div class="player" id="playerBottom"></div>
+      <div class="ctl">
+        <button type="button" class="btn nav" id="firstBtn" aria-label="Start of the game" title="Start (Home)">⏮</button>
+        <button type="button" class="btn nav" id="prevBtn" aria-label="Previous move" title="Back (←)">◀</button>
+        <button type="button" class="btn nav" id="nextBtn" aria-label="Next move" title="Forward (→)">▶</button>
+        <button type="button" class="btn nav" id="lastBtn" aria-label="End of the game" title="End (End)">⏭</button>
+        <button type="button" class="btn" id="flipBtn" title="Turn the board round (F)">Flip</button>
+      </div>
+      <div class="graph" id="graph" aria-label="How the advantage moved through the game"></div>
+    </div>
+
+    <div class="side">
+      <div class="card verdict" id="verdict"></div>
+      <div class="card" id="summary" hidden></div>
+      <div class="card">
+        <h3>Moves</h3>
+        <div class="moves" id="moves"><span class="muted">No game yet.</span></div>
+      </div>
+      <div class="card">
+        <h3>Recent games <span class="muted small" id="instinct"></span></h3>
+        <div class="recent" id="recent"><span class="muted">Loading…</span></div>
+      </div>
+      <div class="warn" id="engwarn" hidden></div>
+    </div>
+  </div>
+</section>
+
+</div>
+</body>
+</html>
