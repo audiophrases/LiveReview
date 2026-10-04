@@ -8,6 +8,11 @@ const FILES = 'abcdefgh';
 const USER_POLL_MS = 4000;
 const RATE_LIMIT_WAIT_MS = 60000;
 const LAST_USER_KEY = 'livewatch.user';
+const ENGINE_KEY = 'livewatch.engine';
+const VIEW_DEPTH = 18;   // the position on screen, three lines
+const SWEEP_DEPTH = 12;  // every other position, one line, for the move verdicts
+const VIEW_LINES = 3;
+const ANALYSABLE = ['standard', 'fromPosition', 'chess960'];
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -15,6 +20,8 @@ const el = {
   status: $('status'), meta: $('meta'), moves: $('moves'), open: $('open'),
   live: $('live'), flip: $('flip'), sound: $('sound'),
   userForm: $('userForm'), userInput: $('userInput'),
+  engine: $('engine'), engineToggle: $('engineToggle'), boardwrap: document.querySelector('.boardwrap'),
+  evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
 
 const state = {
@@ -27,7 +34,9 @@ const state = {
   orientation: 'white',
   flipped: false,
   sound: true,
+  analysis: true,
 };
+try { state.analysis = localStorage.getItem(ENGINE_KEY) !== 'off'; } catch { /* optional */ }
 
 // ---------- streaming ----------
 
@@ -134,6 +143,7 @@ async function openGame(id, session, { quiet = false } = {}) {
   state.game = game;
   state.view = null;
   state.orientation = 'white';
+  evals.clear();
   el.open.href = `${API}/${id}`;
   if (!quiet) setStatus('Loading game…');
   scheduleRender();
@@ -216,6 +226,258 @@ function resultText(game) {
   return [score, why].filter(Boolean).join(' · ') + '.';
 }
 
+// ---------- engine ----------
+// Single-threaded Stockfish 16 in a Worker, spoken to over UCI. One search runs
+// at a time; asking for a new one stops the current search first.
+
+const engine = (() => {
+  let worker = null;
+  let ready = false;
+  let failed = false;
+  let current = null;   // job being searched
+  let pending = null;   // job to start once the current one stops
+  let multipv = 1;
+  let chess960 = false;
+
+  function boot() {
+    if (worker || failed) return;
+    try {
+      worker = new Worker('engine/stockfish-nnue-16-single.js');
+    } catch {
+      failed = true;
+      return;
+    }
+    worker.onerror = () => {
+      failed = true;
+      scheduleRender();
+    };
+    worker.onmessage = (e) => handle(String(e.data));
+    worker.postMessage('uci');
+  }
+
+  function handle(line) {
+    if (line === 'uciok') {
+      worker.postMessage('setoption name MultiPV value 1');
+      worker.postMessage('isready');
+    } else if (line === 'readyok') {
+      if (!ready) {
+        ready = true;
+        next();
+      }
+    } else if (line.startsWith('info ') && current && !current.stopping) {
+      const info = parseInfo(line);
+      if (info) current.onInfo(info);
+    } else if (line.startsWith('bestmove')) {
+      const job = current;
+      current = null;
+      if (job && !job.stopping) job.onDone();
+      next();
+    }
+  }
+
+  function parseInfo(line) {
+    const t = line.split(' ');
+    const info = { depth: 0, multipv: 1, cp: null, mate: null, pv: [] };
+    for (let i = 1; i < t.length; i++) {
+      if (t[i] === 'depth') info.depth = +t[++i];
+      else if (t[i] === 'multipv') info.multipv = +t[++i];
+      else if (t[i] === 'score') {
+        const kind = t[++i];
+        const v = +t[++i];
+        if (kind === 'cp') info.cp = v;
+        else info.mate = v;
+        if (t[i + 1] === 'lowerbound' || t[i + 1] === 'upperbound') return null;
+      } else if (t[i] === 'pv') {
+        info.pv = t.slice(i + 1);
+        break;
+      }
+    }
+    return info.pv.length && (info.cp != null || info.mate != null) ? info : null;
+  }
+
+  function next() {
+    if (!ready || current || !pending) return;
+    const job = pending;
+    pending = null;
+    current = job;
+    if (job.multipv !== multipv) {
+      worker.postMessage(`setoption name MultiPV value ${job.multipv}`);
+      multipv = job.multipv;
+    }
+    if (job.chess960 !== chess960) {
+      worker.postMessage(`setoption name UCI_Chess960 value ${job.chess960}`);
+      chess960 = job.chess960;
+    }
+    worker.postMessage(`position fen ${job.fen}`);
+    worker.postMessage(`go depth ${job.depth}`);
+  }
+
+  function stopCurrent() {
+    if (current && !current.stopping) {
+      current.stopping = true;
+      worker.postMessage('stop');
+    }
+  }
+
+  return {
+    get failed() { return failed; },
+    // The job being searched, unless it has been told to stop.
+    get active() { return current && !current.stopping ? current : null; },
+    run(job) {
+      boot();
+      if (failed) return;
+      pending = job;
+      if (current) stopCurrent();
+      else next();
+    },
+    halt() {
+      pending = null;
+      if (worker) stopCurrent();
+    },
+  };
+})();
+
+// fen -> { depth, multipv, lines: [{ depth, cp, mate, pv }] }, scores from White's side.
+const evals = new Map();
+
+function canAnalyse(game) {
+  const key = game?.info?.variant?.key || 'standard';
+  return state.analysis && !engine.failed && ANALYSABLE.includes(key);
+}
+
+function pumpEngine() {
+  const game = state.game;
+  if (!game || !canAnalyse(game) || !game.plies.length) {
+    engine.halt();
+    return;
+  }
+  const chess960 = game.info?.variant?.key === 'chess960';
+  const want = (fen, depth, multipv) => {
+    const e = evals.get(fen);
+    return !terminal(fen) && (!e || e.depth < depth || e.multipv < multipv);
+  };
+  const start = (fen, depth, multipv) => {
+    const a = engine.active;
+    if (a && a.fen === fen && a.depth === depth && a.multipv === multipv) return;
+    engine.run({
+      fen, depth, multipv, chess960,
+      onInfo: (info) => recordInfo(fen, info),
+      onDone: () => {
+        const e = evals.get(fen) || newEval(fen);
+        e.depth = Math.max(e.depth, depth);
+        e.multipv = Math.max(e.multipv, multipv);
+        scheduleRender();
+      },
+    });
+  };
+
+  // The position on screen comes first, then a sweep back through the game.
+  const viewFen = viewedFen();
+  if (want(viewFen, VIEW_DEPTH, VIEW_LINES)) return start(viewFen, VIEW_DEPTH, VIEW_LINES);
+  for (let i = game.plies.length - 1; i >= 0; i--) {
+    const fen = game.plies[i].fen;
+    if (want(fen, SWEEP_DEPTH, 1)) return start(fen, SWEEP_DEPTH, 1);
+  }
+}
+
+function newEval(fen) {
+  const e = { depth: 0, multipv: 0, lines: [] };
+  evals.set(fen, e);
+  return e;
+}
+
+function recordInfo(fen, info) {
+  const e = evals.get(fen) || newEval(fen);
+  const sign = fen.split(' ')[1] === 'b' ? -1 : 1;
+  const line = {
+    depth: info.depth,
+    cp: info.cp == null ? null : info.cp * sign,
+    mate: info.mate == null ? null : info.mate * sign,
+    pv: info.pv,
+  };
+  // A new search restarts at depth 1; don't let it replace a deeper result for the same slot.
+  const old = e.lines[info.multipv - 1];
+  if (!old || line.depth >= old.depth) e.lines[info.multipv - 1] = line;
+  if (fen === viewedFen()) scheduleRender();
+  else scheduleMovesRender();
+}
+
+function viewedFen() {
+  const idx = currentIndex();
+  return idx >= 0 ? state.game.plies[idx].fen : null;
+}
+
+// 'w' or 'b' for the side that has been mated, 'draw' for stalemate, null otherwise.
+const terminalCache = new Map();
+function terminal(fen) {
+  if (terminalCache.has(fen)) return terminalCache.get(fen);
+  let result = null;
+  if (chess.load(fen)) {
+    if (chess.in_checkmate()) result = chess.turn();
+    else if (chess.in_stalemate()) result = 'draw';
+  }
+  if (terminalCache.size > 5000) terminalCache.clear();
+  terminalCache.set(fen, result);
+  return result;
+}
+
+// Winning chances from White's side, -1..1 (Lichess's curve).
+function winChances(line) {
+  if (line.mate != null) return line.mate > 0 ? 1 : -1;
+  return 2 / (1 + Math.exp(-0.00368208 * line.cp)) - 1;
+}
+
+function positionChances(fen) {
+  const t = terminal(fen);
+  if (t === 'w') return -1;
+  if (t === 'b') return 1;
+  if (t === 'draw') return 0;
+  const line = evals.get(fen)?.lines[0];
+  return line ? winChances(line) : null;
+}
+
+// Verdict on the move that produced ply i, from the winning chances the mover gave away.
+function verdict(i) {
+  const plies = state.game.plies;
+  if (i < 1 || !canAnalyse(state.game)) return null;
+  const before = positionChances(plies[i - 1].fen);
+  const after = positionChances(plies[i].fen);
+  if (before == null || after == null) return null;
+  const mover = plies[i - 1].fen.split(' ')[1] === 'w' ? 1 : -1;
+  const lost = (before - after) * mover;
+  if (lost >= 0.3) return 'blunder';
+  if (lost >= 0.2) return 'mistake';
+  if (lost >= 0.1) return 'inaccuracy';
+  return null;
+}
+
+const VERDICT_MARK = { inaccuracy: '?!', mistake: '?', blunder: '??' };
+const VERDICT_WORD = { inaccuracy: 'Inaccuracy', mistake: 'Mistake', blunder: 'Blunder' };
+
+function fmtEval(line) {
+  if (!line) return '';
+  if (line.mate != null) return `${line.mate > 0 ? '' : '-'}M${Math.abs(line.mate)}`;
+  const v = line.cp / 100;
+  return (v > 0 ? '+' : '') + v.toFixed(Math.abs(v) >= 10 ? 0 : 1);
+}
+
+function pvToSan(fen, pv, max = 10) {
+  if (!chess.load(fen)) return pv.slice(0, max).join(' ');
+  const out = [];
+  const parts = fen.split(' ');
+  let moveNo = +parts[5] || 1;
+  let white = parts[1] === 'w';
+  for (const uci of pv.slice(0, max)) {
+    const m = chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
+    if (!m) break;
+    if (white) out.push(`${moveNo}.${m.san}`);
+    else out.push(out.length ? m.san : `${moveNo}…${m.san}`);
+    if (!white) moveNo++;
+    white = !white;
+  }
+  return out.join(' ');
+}
+
 // ---------- rendering ----------
 
 const squares = [];
@@ -255,12 +517,129 @@ function render() {
   renderBars(ply, idx);
   renderMoves(idx);
   renderMeta();
+  renderAnalysis(ply, idx);
   el.live.classList.toggle('on', state.view == null);
   if (game && ply) {
     if (game.over) setStatus([game.result || resultText(game), game.waiting].filter(Boolean).join(' '));
     else if (state.view != null) setStatus('Reviewing. Press Live to catch up.');
     else setStatus('Live');
   }
+}
+
+let movesRenderQueued = false;
+function scheduleMovesRender() {
+  if (movesRenderQueued) return;
+  movesRenderQueued = true;
+  setTimeout(() => {
+    movesRenderQueued = false;
+    renderMarks();
+    pumpEngine();
+  }, 250);
+}
+
+function renderAnalysis(ply, idx) {
+  const on = canAnalyse(state.game);
+  el.engineToggle.classList.toggle('on', state.analysis);
+  el.engineToggle.textContent = state.analysis ? 'Engine on' : 'Engine off';
+  el.boardwrap.classList.toggle('off', !on || !ply);
+  pumpEngine();
+  if (!state.analysis || !ply) {
+    el.engine.innerHTML = '';
+    drawArrow(null);
+    return;
+  }
+  if (engine.failed) {
+    el.engine.innerHTML = '<div class="head">Stockfish couldn’t start in this browser.</div>';
+    drawArrow(null);
+    return;
+  }
+  if (!on) {
+    el.engine.innerHTML = `<div class="head">No engine analysis for ${esc(state.game.info.variant.name)}.</div>`;
+    drawArrow(null);
+    return;
+  }
+
+  // Eval bar
+  const t = terminal(ply.fen);
+  const e = evals.get(ply.fen);
+  const best = e?.lines[0];
+  const chances = positionChances(ply.fen);
+  const whiteShare = chances == null ? 50 : (chances + 1) * 50;
+  const blackBottom = (state.orientation === 'black') !== state.flipped;
+  el.evalbar.classList.toggle('flipped', blackBottom);
+  el.evalbar.classList.toggle('black-ahead', whiteShare < 50);
+  el.evalfill.style.height = `${whiteShare}%`;
+  el.evaltext.textContent = t === 'draw' ? '½' : t ? (t === 'w' ? '0-1' : '1-0') : best ? fmtEval(best).replace(/^[+-]/, '') : '';
+
+  drawArrow(t ? null : best?.pv[0]);
+
+  // Engine lines
+  const depth = e ? Math.max(0, ...e.lines.filter(Boolean).map((l) => l.depth)) : 0;
+  let html = `<div class="head"><span>Stockfish 16</span><span>${t ? '' : depth ? `depth ${depth}` : 'thinking…'}</span></div>`;
+  if (t) html += `<div class="line">${t === 'draw' ? 'Stalemate.' : 'Checkmate.'}</div>`;
+  for (const line of (e?.lines || []).slice(0, VIEW_LINES)) {
+    if (!line) continue;
+    html += `<div class="line"><span class="ev${winChances(line) < 0 ? ' neg' : ''}">${fmtEval(line)}</span>` +
+      `<span class="pv">${esc(pvToSan(ply.fen, line.pv))}</span></div>`;
+  }
+
+  // What the engine thinks of the move that led here
+  const v = idx >= 1 ? verdict(idx) : null;
+  if (v) {
+    const prevFen = state.game.plies[idx - 1].fen;
+    const better = evals.get(prevFen)?.lines[0];
+    const betterSan = better ? toSan(prevFen, better.pv[0]) : null;
+    html += `<div class="note"><span class="v-${v}-t">${VERDICT_WORD[v]}.</span> ${esc(ply.san || ply.lm)} was played` +
+      (betterSan && betterSan !== ply.san ? `; best was <b>${esc(betterSan)}</b> (${fmtEval(better)}).` : '.') + '</div>';
+  }
+  html += tallyHtml();
+  el.engine.innerHTML = html;
+}
+
+function tallyHtml() {
+  const plies = state.game.plies;
+  if (plies.length < 2) return '';
+  const count = { white: { inaccuracy: 0, mistake: 0, blunder: 0 }, black: { inaccuracy: 0, mistake: 0, blunder: 0 } };
+  let checked = 0;
+  for (let i = 1; i < plies.length; i++) {
+    if (positionChances(plies[i].fen) == null || positionChances(plies[i - 1].fen) == null) continue;
+    checked++;
+    const v = verdict(i);
+    if (v) count[plies[i - 1].fen.split(' ')[1] === 'w' ? 'white' : 'black'][v]++;
+  }
+  const side = (c) => `${c === 'white' ? 'White' : 'Black'}: ${count[c].inaccuracy} ?! · ${count[c].mistake} ? · ${count[c].blunder} ??`;
+  const progress = checked < plies.length - 1 ? `<br>Checked ${checked} of ${plies.length - 1} moves…` : '';
+  return `<div class="tally">${side('white')}<br>${side('black')}${progress}</div>`;
+}
+
+function drawArrow(uci) {
+  let svg = el.board.querySelector('svg.arrows');
+  if (!svg) {
+    svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'arrows');
+    svg.setAttribute('viewBox', '0 0 8 8');
+    el.board.appendChild(svg);
+  }
+  if (!uci) {
+    svg.innerHTML = '';
+    return;
+  }
+  const black = (state.orientation === 'black') !== state.flipped;
+  const center = (sq) => {
+    const f = sq.charCodeAt(0) - 97;
+    const r = +sq[1] - 1;
+    return black ? [7 - f + 0.5, r + 0.5] : [f + 0.5, 7 - r + 0.5];
+  };
+  const [x1, y1] = center(uci.slice(0, 2));
+  const [x2, y2] = center(uci.slice(2, 4));
+  const len = Math.hypot(x2 - x1, y2 - y1);
+  const ux = (x2 - x1) / len;
+  const uy = (y2 - y1) / len;
+  const bx = x2 - ux * 0.42;
+  const by = y2 - uy * 0.42;
+  svg.innerHTML =
+    `<line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="#2f7fd8" stroke-width="0.17" stroke-linecap="round" opacity="0.8"/>` +
+    `<polygon points="${x2},${y2} ${bx - uy * 0.26},${by + ux * 0.26} ${bx + uy * 0.26},${by - ux * 0.26}" fill="#2f7fd8" opacity="0.8"/>`;
 }
 
 function setWaiting(text) {
@@ -379,11 +758,12 @@ function renderMoves(idx) {
       el.moves.appendChild(li);
     }
     const btn = document.createElement('button');
-    btn.textContent = plies[i].san || plies[i].lm;
+    btn.innerHTML = `${esc(plies[i].san || plies[i].lm)}<span class="mark"></span>`;
     btn.dataset.ply = i;
     el.moves.lastElementChild.appendChild(btn);
   }
   renderedMoves.count = Math.max(plies.length, 1);
+  renderMarks();
   if (renderedMoves.cur !== idx) {
     el.moves.querySelector('button.cur')?.classList.remove('cur');
     const btn = el.moves.querySelector(`button[data-ply="${idx}"]`);
@@ -397,6 +777,19 @@ function renderMoves(idx) {
       else if (b.bottom > l.bottom) list.scrollTop += b.bottom - l.bottom;
     }
     renderedMoves.cur = idx;
+  }
+}
+
+function renderMarks() {
+  if (!state.game) return;
+  for (const btn of el.moves.querySelectorAll('button[data-ply]')) {
+    const v = verdict(+btn.dataset.ply);
+    const cls = v ? `v-${v}` : '';
+    if (btn.dataset.v === cls) continue;
+    btn.dataset.v = cls;
+    btn.classList.remove('v-inaccuracy', 'v-mistake', 'v-blunder');
+    if (cls) btn.classList.add(cls);
+    btn.querySelector('.mark').textContent = v ? VERDICT_MARK[v] : '';
   }
 }
 
@@ -479,6 +872,12 @@ el.sound.onclick = () => {
   el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 };
 
+el.engineToggle.onclick = () => {
+  state.analysis = !state.analysis;
+  try { localStorage.setItem(ENGINE_KEY, state.analysis ? 'on' : 'off'); } catch { /* optional */ }
+  scheduleRender();
+};
+
 document.addEventListener('keydown', (e) => {
   if (e.target.closest('input')) return;
   const keys = {
@@ -488,6 +887,7 @@ document.addEventListener('keydown', (e) => {
     End: () => el.live.click(),
     f: () => el.flip.click(),
     m: () => el.sound.click(),
+    e: () => el.engineToggle.click(),
   };
   if (keys[e.key]) {
     e.preventDefault();

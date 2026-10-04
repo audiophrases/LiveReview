@@ -171,3 +171,70 @@ a { color: var(--accent); }
   .pick input { flex: 1; width: auto; min-width: 0; }
   .controls a { margin-left: 0; }
 }
+
+/* ---------- analysis ---------- */
+.boardwrap { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 6px; }
+.boardwrap.off { grid-template-columns: minmax(0, 1fr); }
+.boardwrap.off .evalbar { display: none; }
+.evalbar {
+  position: relative;
+  background: #3b3935;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.evalbar .fill {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 50%;
+  background: #f5f3ef;
+  transition: height 0.4s ease;
+}
+.evalbar.flipped .fill { bottom: auto; top: 0; }
+.evalbar span {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font: 700 10px/1 system-ui, sans-serif;
+  bottom: 4px;
+  color: #3b3935;
+}
+.evalbar.black-ahead span { bottom: auto; top: 4px; color: #f5f3ef; }
+.evalbar.flipped span { bottom: auto; top: 4px; }
+.evalbar.flipped.black-ahead span { top: auto; bottom: 4px; }
+
+.board { position: relative; }
+.board svg.arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+.engine:empty { display: none; }
+.engine {
+  border-top: 1px solid var(--line);
+  padding: 8px 0;
+  font-size: 13px;
+}
+.engine .head { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
+.engine .line { display: flex; gap: 8px; padding: 2px 0; white-space: nowrap; overflow: hidden; }
+.engine .line .pv { overflow: hidden; text-overflow: ellipsis; }
+.engine .ev {
+  flex: none;
+  min-width: 48px;
+  text-align: center;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 0 4px;
+  background: #f5f3ef;
+  color: #22201c;
+  border: 1px solid var(--line);
+}
+.engine .ev.neg { background: #3b3935; color: #f5f3ef; }
+.engine .note { margin-top: 6px; }
+.engine .tally { margin-top: 4px; color: var(--muted); }
+
+.moves button .mark { font-weight: 700; margin-left: 2px; }
+.moves button.v-inaccuracy .mark { color: #c9a11b; }
+.moves button.v-mistake .mark { color: #e07b22; }
+.moves button.v-blunder .mark { color: #d0342c; }
+.moves button.cur .mark { color: inherit; }
+.v-inaccuracy-t { color: #c9a11b; font-weight: 700; }
+.v-mistake-t { color: #e07b22; font-weight: 700; }
+.v-blunder-t { color: #d0342c; font-weight: 700; }
+.controls #engineToggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Live Watch</title>
+<link rel="icon" href="pieces/white-knight.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,7 +19,10 @@
 <main class="layout">
   <section class="stage">
     <div class="bar" id="barTop"></div>
-    <div class="board" id="board"></div>
+    <div class="boardwrap">
+      <div class="evalbar" id="evalbar" aria-label="Engine evaluation"><div class="fill" id="evalfill"></div><span id="evaltext"></span></div>
+      <div class="board" id="board"></div>
+    </div>
     <div class="bar" id="barBottom"></div>
     <div class="controls">
       <button id="first" title="First move (Home)">⏮</button>
@@ -27,6 +31,7 @@
       <button id="live" title="Back to live (End)">Live</button>
       <button id="flip" title="Flip board (F)">Flip</button>
       <button id="sound" title="Move sound (M)">Sound on</button>
+      <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
       <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
     </div>
   </section>
@@ -34,6 +39,7 @@
   <aside class="side">
     <p id="status" class="status">Connecting…</p>
     <div id="meta" class="meta"></div>
+    <div id="engine" class="engine"></div>
     <ol id="moves" class="moves"></ol>
   </aside>
 </main>
