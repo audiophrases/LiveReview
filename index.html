@@ -32,6 +32,7 @@
       <button id="flip" title="Flip board (F)">Flip</button>
       <button id="sound" title="Move sound (M)">Sound on</button>
       <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
+      <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
       <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
     </div>
   </section>
@@ -39,6 +40,25 @@
   <aside class="side">
     <p id="status" class="status">Connecting…</p>
     <div id="meta" class="meta"></div>
+    <details id="settings" class="settings">
+      <summary>Analysis settings</summary>
+      <label><input type="checkbox" data-opt="bar"> Advantage bar</label>
+      <label><input type="checkbox" data-opt="arrow"> Best-move arrow</label>
+      <label><input type="checkbox" data-opt="lines"> Engine lines</label>
+      <label><input type="checkbox" data-opt="symbols"> Move symbols (!! ! ★ !? ?! ? ??)</label>
+      <label>Depth
+        <select data-opt="depth">
+          <option value="12">12 (fast)</option><option value="16">16</option><option value="18">18</option>
+          <option value="20">20</option><option value="22">22 (slow)</option>
+        </select>
+      </label>
+      <label>Lines
+        <select data-opt="multipv">
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+          <option value="4">4</option><option value="5">5</option>
+        </select>
+      </label>
+    </details>
     <div id="engine" class="engine"></div>
     <ol id="moves" class="moves"></ol>
   </aside>

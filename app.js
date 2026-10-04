@@ -1,18 +1,34 @@
 // Live Watch: follows a Lichess player and shows their games live through the
-// public streaming API. One game stream is open at a time; between games the
-// player's status is polled so the next game opens as soon as it starts.
+// public streaming API, with Stockfish analysis on top.
+//
+// Lichess delays the public game stream by three plies for spectators. When the
+// game is featured on a Lichess TV channel, the channel feed is real-time, so we
+// listen to it as well and slot each position in by ply number; the delayed
+// stream then fills in whatever the TV feed skipped.
 
 const API = 'https://lichess.org';
 const PIECE_NAMES = { p: 'pawn', n: 'knight', b: 'bishop', r: 'rook', q: 'queen', k: 'king' };
+const VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 const FILES = 'abcdefgh';
 const USER_POLL_MS = 4000;
+const TV_CHECK_MS = 10000;
 const RATE_LIMIT_WAIT_MS = 60000;
 const LAST_USER_KEY = 'livewatch.user';
 const ENGINE_KEY = 'livewatch.engine';
-const VIEW_DEPTH = 18;   // the position on screen, three lines
-const SWEEP_DEPTH = 12;  // every other position, one line, for the move verdicts
-const VIEW_LINES = 3;
+const OPTS_KEY = 'livewatch.opts';
+const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
+const SWEEP_LINES = 2;
 const ANALYSABLE = ['standard', 'fromPosition', 'chess960'];
+
+const KINDS = {
+  brilliant: { sym: '!!', word: 'Brilliant' },
+  great: { sym: '!', word: 'Great move' },
+  best: { sym: '★', word: 'Best move' },
+  interesting: { sym: '!?', word: 'Interesting' },
+  inaccuracy: { sym: '?!', word: 'Inaccuracy' },
+  mistake: { sym: '?', word: 'Mistake' },
+  blunder: { sym: '??', word: 'Blunder' },
+};
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -20,7 +36,8 @@ const el = {
   status: $('status'), meta: $('meta'), moves: $('moves'), open: $('open'),
   live: $('live'), flip: $('flip'), sound: $('sound'),
   userForm: $('userForm'), userInput: $('userInput'),
-  engine: $('engine'), engineToggle: $('engineToggle'), boardwrap: document.querySelector('.boardwrap'),
+  engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
+  settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
   evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
 
@@ -28,15 +45,25 @@ const state = {
   user: null,          // { name, id } of the player being followed
   session: 0,          // bumped whenever the followed player changes, so stale callbacks drop out
   gameCtrl: null,      // AbortController for the game stream
+  tvCtrl: null,        // AbortController for the TV channel feed, while the game is featured
   pollTimer: null,
-  game: null,          // { id, info, plies: [{ fen, lm, san, wc, bc }], over, result, receivedAt }
+  tvTimer: null,
+  game: null,
   view: null,          // ply index being viewed, or null to follow live
   orientation: 'white',
   flipped: false,
   sound: true,
   analysis: true,
+  opts: { bar: true, arrow: true, lines: true, symbols: true, depth: 18, multipv: 3 },
 };
-try { state.analysis = localStorage.getItem(ENGINE_KEY) !== 'off'; } catch { /* optional */ }
+try {
+  state.analysis = localStorage.getItem(ENGINE_KEY) !== 'off';
+  Object.assign(state.opts, JSON.parse(localStorage.getItem(OPTS_KEY) || '{}'));
+} catch { /* optional */ }
+
+function saveOpts() {
+  try { localStorage.setItem(OPTS_KEY, JSON.stringify(state.opts)); } catch { /* optional */ }
+}
 
 // ---------- streaming ----------
 
@@ -69,8 +96,7 @@ function isAbort(err) {
 
 function watchUser(name) {
   state.session++;
-  state.gameCtrl?.abort();
-  state.gameCtrl = null;
+  closeGame();
   clearTimeout(state.pollTimer);
   state.user = { name, id: name.toLowerCase() };
   state.game = null;
@@ -135,11 +161,22 @@ async function openLastGame(session) {
   } catch { /* no previous game to show */ }
 }
 
-async function openGame(id, session, { quiet = false } = {}) {
+function closeGame() {
   state.gameCtrl?.abort();
+  state.gameCtrl = null;
+  stopTv();
+  clearTimeout(state.tvTimer);
+  state.tvTimer = null;
+}
+
+async function openGame(id, session, { quiet = false } = {}) {
+  closeGame();
   const ctrl = new AbortController();
   state.gameCtrl = ctrl;
-  const game = { id, info: null, plies: [], over: false, result: null, receivedAt: 0, lastLineAt: 0, waiting: null };
+  const game = {
+    id, info: null, plies: [], base: null, over: false, result: null,
+    receivedAt: 0, lastLineAt: 0, waiting: null, version: 0, realtime: false,
+  };
   state.game = game;
   state.view = null;
   state.orientation = 'white';
@@ -156,7 +193,8 @@ async function openGame(id, session, { quiet = false } = {}) {
         state.orientation = obj.players.black?.user?.id === state.user.id ? 'black' : 'white';
         if (obj.status && !['created', 'started'].includes(obj.status.name ?? obj.status)) finish(game);
       } else if (obj.fen) {
-        addPly(game, obj);
+        addPosition(game, obj);
+        if (!quiet && !game.over && !state.tvTimer) state.tvTimer = setTimeout(() => checkTv(game), 500);
       }
       scheduleRender();
     });
@@ -167,6 +205,7 @@ async function openGame(id, session, { quiet = false } = {}) {
     else if (!quiet) setStatus('The game stream dropped.');
     game.over = true;
   }
+  stopTv();
   scheduleRender();
 
   // A live game just ended: start looking for the next one.
@@ -179,36 +218,119 @@ function finish(game) {
   if (game.over) return;
   game.over = true;
   game.result = resultText(game);
+  if (state.game === game) stopTv();
+}
+
+// ---------- real-time moves from Lichess TV ----------
+
+async function checkTv(game) {
+  state.tvTimer = null;
+  if (state.game !== game || game.over) return;
+  if (!state.tvCtrl) {
+    try {
+      const res = await fetch(`${API}/api/tv/channels`);
+      const channels = res.ok ? await res.json() : {};
+      const channel = Object.keys(channels).find((k) => channels[k]?.gameId === game.id);
+      if (channel && state.game === game && !game.over && !state.tvCtrl) listenTv(game, channel);
+    } catch { /* try again on the next check */ }
+  }
+  if (state.game === game && !game.over) state.tvTimer = setTimeout(() => checkTv(game), TV_CHECK_MS);
+}
+
+async function listenTv(game, channel) {
+  const ctrl = new AbortController();
+  state.tvCtrl = ctrl;
+  try {
+    await streamNdjson(`${API}/api/tv/${channel}/feed`, ctrl.signal, (msg) => {
+      if (state.game !== game || state.tvCtrl !== ctrl) return;
+      if (msg.t === 'featured') {
+        if (msg.d.id !== game.id) {
+          stopTv();
+          return;
+        }
+        game.realtime = true;
+        const secs = Object.fromEntries((msg.d.players || []).map((p) => [p.color, p.seconds]));
+        addPosition(game, { fen: msg.d.fen, wc: secs.white, bc: secs.black });
+      } else if (msg.t === 'fen' && game.realtime) {
+        addPosition(game, msg.d);
+      }
+      scheduleRender();
+    });
+  } catch { /* fall back to the delayed stream */ }
+  if (state.tvCtrl === ctrl) stopTv();
+}
+
+function stopTv() {
+  state.tvCtrl?.abort();
+  state.tvCtrl = null;
+  if (state.game?.realtime) {
+    state.game.realtime = false;
+    scheduleRender();
+  }
 }
 
 // ---------- game data ----------
 
 const chess = new Chess();
 
-function addPly(game, line) {
-  const prev = game.plies[game.plies.length - 1];
-  const ply = { fen: line.fen, lm: line.lm || null, san: null, wc: line.wc, bc: line.bc };
-  if (ply.lm && prev) ply.san = toSan(prev.fen, ply.lm);
-  game.plies.push(ply);
+// Plies since the start of the game, read from the FEN's move counter and side to move.
+function fenPly(fen) {
+  const parts = fen.split(' ');
+  return ((+parts[5] || 1) - 1) * 2 + (parts[1] === 'b' ? 1 : 0);
+}
+
+// Store a position at its ply. Positions can arrive out of order (TV feed ahead,
+// delayed stream behind), so game.plies may have gaps until both catch up.
+function addPosition(game, line) {
+  const ply = fenPly(line.fen);
+  if (game.base == null) game.base = ply;
+  const idx = ply - game.base;
+  if (idx < 0) return;
+  const plies = game.plies;
+  const oldLength = plies.length;
+  const existing = plies[idx];
+  if (existing) {
+    // The TV feed's first position has no last move; the stream can supply it.
+    if (!existing.lm && line.lm) {
+      existing.lm = line.lm;
+      existing.san = plies[idx - 1] ? toSan(plies[idx - 1].fen, line.lm) : null;
+      game.version++;
+    }
+    return;
+  }
+  const entry = { fen: line.fen, lm: line.lm || null, san: null, wc: line.wc, bc: line.bc };
+  if (entry.lm && plies[idx - 1]) entry.san = toSan(plies[idx - 1].fen, entry.lm);
+  plies[idx] = entry;
+  const after = plies[idx + 1];
+  if (after?.lm && !after.san) after.san = toSan(entry.fen, after.lm);
+  if (idx < oldLength) {
+    game.version++;   // filled a gap
+    return;
+  }
   const now = performance.now();
   // The stream first replays the whole game in one burst; only chime for moves that arrive on their own.
-  if (ply.lm && game.lastLineAt && now - game.lastLineAt > 400) playMoveSound(ply.san);
+  if (entry.lm && game.lastLineAt && now - game.lastLineAt > 400) playMoveSound(entry.san);
   game.lastLineAt = now;
   game.receivedAt = now;
 }
 
-function toSan(fen, uci) {
-  if (!chess.load(fen)) return uci;
+// Lichess sometimes sends castling as king-takes-own-rook; turn it into the king's real move.
+function castleFix(fen, uci) {
+  if (!uci || !chess.load(fen)) return uci;
   const from = uci.slice(0, 2);
-  let to = uci.slice(2, 4);
-  const promotion = uci[4];
+  const to = uci.slice(2, 4);
   const piece = chess.get(from);
   const target = chess.get(to);
-  // Lichess sometimes sends castling as king-takes-own-rook.
   if (piece?.type === 'k' && target?.type === 'r' && target.color === piece.color) {
-    to = (to[0] > from[0] ? 'g' : 'c') + from[1];
+    return from + (to[0] > from[0] ? 'g' : 'c') + from[1];
   }
-  const move = chess.move({ from, to, promotion });
+  return uci;
+}
+
+function toSan(fen, uci) {
+  const fixed = castleFix(fen, uci);
+  if (!chess.load(fen)) return uci;
+  const move = chess.move({ from: fixed.slice(0, 2), to: fixed.slice(2, 4), promotion: fixed[4] });
   return move ? move.san : uci;
 }
 
@@ -373,10 +495,11 @@ function pumpEngine() {
 
   // The position on screen comes first, then a sweep back through the game.
   const viewFen = viewedFen();
-  if (want(viewFen, VIEW_DEPTH, VIEW_LINES)) return start(viewFen, VIEW_DEPTH, VIEW_LINES);
+  const { depth, multipv } = state.opts;
+  if (want(viewFen, depth, multipv)) return start(viewFen, depth, multipv);
   for (let i = game.plies.length - 1; i >= 0; i--) {
-    const fen = game.plies[i].fen;
-    if (want(fen, SWEEP_DEPTH, 1)) return start(fen, SWEEP_DEPTH, 1);
+    const p = game.plies[i];
+    if (p && want(p.fen, SWEEP_DEPTH, SWEEP_LINES)) return start(p.fen, SWEEP_DEPTH, SWEEP_LINES);
   }
 }
 
@@ -436,29 +559,80 @@ function positionChances(fen) {
   return line ? winChances(line) : null;
 }
 
-// Verdict on the move that produced ply i, from the winning chances the mover gave away.
-function verdict(i) {
-  const plies = state.game.plies;
-  if (i < 1 || !canAnalyse(state.game)) return null;
-  const before = positionChances(plies[i - 1].fen);
-  const after = positionChances(plies[i].fen);
+// Does the move leave the moved piece where the opponent can win material by taking it?
+const sacCache = new Map();
+function isSacrifice(fen, uci) {
+  const key = `${fen}|${uci}`;
+  if (sacCache.has(key)) return sacCache.get(key);
+  let result = false;
+  const fixed = castleFix(fen, uci);
+  if (chess.load(fen)) {
+    const m = chess.move({ from: fixed.slice(0, 2), to: fixed.slice(2, 4), promotion: fixed[4] });
+    const value = m ? VALUE[m.promotion || m.piece] : 0;
+    if (m && value >= 3) {
+      const gained = m.captured ? VALUE[m.captured] : 0;
+      for (const reply of chess.moves({ verbose: true })) {
+        if (reply.to !== m.to) continue;
+        chess.move(reply);
+        const recapture = chess.moves({ verbose: true }).some((x) => x.to === m.to);
+        chess.undo();
+        // What the mover nets if the opponent takes: what it captured, minus the piece, plus any recapture.
+        if (gained - value + (recapture ? VALUE[reply.piece] : 0) <= -2) {
+          result = true;
+          break;
+        }
+      }
+    }
+  }
+  if (sacCache.size > 5000) sacCache.clear();
+  sacCache.set(key, result);
+  return result;
+}
+
+// What kind of move produced ply i: one of KINDS, or null for an ordinary good move.
+function classify(i) {
+  const plies = state.game?.plies;
+  if (!plies || i < 1 || !canAnalyse(state.game)) return null;
+  const prev = plies[i - 1];
+  const cur = plies[i];
+  if (!prev || !cur?.lm) return null;
+  const before = positionChances(prev.fen);
+  const after = positionChances(cur.fen);
   if (before == null || after == null) return null;
-  const mover = plies[i - 1].fen.split(' ')[1] === 'w' ? 1 : -1;
-  const lost = (before - after) * mover;
+  const s = prev.fen.split(' ')[1] === 'w' ? 1 : -1;  // mover's point of view
+  const lost = (before - after) * s;
   if (lost >= 0.3) return 'blunder';
   if (lost >= 0.2) return 'mistake';
   if (lost >= 0.1) return 'inaccuracy';
+
+  const prevLines = evals.get(prev.fen)?.lines || [];
+  const bestUci = prevLines[0] ? castleFix(prev.fen, prevLines[0].pv[0]) : null;
+  const isBest = castleFix(prev.fen, cur.lm) === bestUci || lost < 0.01;
+  const sac = isSacrifice(prev.fen, cur.lm);
+  const moverBefore = before * s;
+  const moverAfter = after * s;
+  if (sac && isBest && moverAfter > -0.1 && moverBefore < 0.95) return 'brilliant';
+  if (isBest && prevLines[1] && moverBefore < 0.95 &&
+      (winChances(prevLines[0]) - winChances(prevLines[1])) * s >= 0.25) return 'great';
+  if (sac && lost < 0.1) return 'interesting';
+  if (isBest) return 'best';
   return null;
 }
-
-const VERDICT_MARK = { inaccuracy: '?!', mistake: '?', blunder: '??' };
-const VERDICT_WORD = { inaccuracy: 'Inaccuracy', mistake: 'Mistake', blunder: 'Blunder' };
 
 function fmtEval(line) {
   if (!line) return '';
   if (line.mate != null) return `${line.mate > 0 ? '' : '-'}M${Math.abs(line.mate)}`;
   const v = line.cp / 100;
   return (v > 0 ? '+' : '') + v.toFixed(Math.abs(v) >= 10 ? 0 : 1);
+}
+
+function describeAdvantage(chances) {
+  const a = Math.abs(chances);
+  if (a < 0.1) return 'Equal position';
+  const side = chances > 0 ? 'White' : 'Black';
+  if (a < 0.3) return `${side} is slightly better`;
+  if (a < 0.6) return `${side} is better`;
+  return `${side} is winning`;
 }
 
 function pvToSan(fen, pv, max = 10) {
@@ -503,29 +677,6 @@ function scheduleRender() {
   });
 }
 
-function currentIndex() {
-  const n = state.game?.plies.length || 0;
-  if (!n) return -1;
-  return state.view == null ? n - 1 : Math.min(state.view, n - 1);
-}
-
-function render() {
-  const game = state.game;
-  const idx = currentIndex();
-  const ply = idx >= 0 ? game.plies[idx] : null;
-  renderBoard(ply);
-  renderBars(ply, idx);
-  renderMoves(idx);
-  renderMeta();
-  renderAnalysis(ply, idx);
-  el.live.classList.toggle('on', state.view == null);
-  if (game && ply) {
-    if (game.over) setStatus([game.result || resultText(game), game.waiting].filter(Boolean).join(' '));
-    else if (state.view != null) setStatus('Reviewing. Press Live to catch up.');
-    else setStatus('Live');
-  }
-}
-
 let movesRenderQueued = false;
 function scheduleMovesRender() {
   if (movesRenderQueued) return;
@@ -537,11 +688,48 @@ function scheduleMovesRender() {
   }, 250);
 }
 
-function renderAnalysis(ply, idx) {
-  const on = canAnalyse(state.game);
+function currentIndex() {
+  const n = state.game?.plies.length || 0;
+  if (!n) return -1;
+  return state.view == null ? n - 1 : Math.min(state.view, n - 1);
+}
+
+function render() {
+  const game = state.game;
+  const idx = currentIndex();
+  const ply = idx >= 0 ? game.plies[idx] : null;
+  renderBoard(ply, idx);
+  renderBars(ply, idx);
+  renderMoves(idx);
+  renderMeta();
+  renderAnalysis(ply, idx);
+  renderControls();
+  if (game && ply) {
+    if (game.over) setStatus([game.result || resultText(game), game.waiting].filter(Boolean).join(' '));
+    else if (state.view != null) setStatus('Reviewing. Press Live to catch up.');
+    else if (game.realtime) setStatus('Live · real time (featured on Lichess TV)');
+    else setStatus('Live · Lichess shows spectators each move 3 plies late');
+  }
+}
+
+function renderControls() {
+  el.live.classList.toggle('on', state.view == null);
   el.engineToggle.classList.toggle('on', state.analysis);
   el.engineToggle.textContent = state.analysis ? 'Engine on' : 'Engine off';
-  el.boardwrap.classList.toggle('off', !on || !ply);
+  el.bestToggle.classList.toggle('on', state.opts.arrow);
+  el.bestToggle.disabled = !state.analysis;
+  for (const input of el.settings.querySelectorAll('[data-opt]')) {
+    const v = state.opts[input.dataset.opt];
+    if (input.type === 'checkbox') input.checked = !!v;
+    else input.value = String(v);
+    input.disabled = !state.analysis;
+  }
+}
+
+function renderAnalysis(ply, idx) {
+  const on = canAnalyse(state.game);
+  const opts = state.opts;
+  el.boardwrap.classList.toggle('off', !on || !ply || !opts.bar);
   pumpEngine();
   if (!state.analysis || !ply) {
     el.engine.innerHTML = '';
@@ -559,7 +747,7 @@ function renderAnalysis(ply, idx) {
     return;
   }
 
-  // Eval bar
+  // Advantage bar
   const t = terminal(ply.fen);
   const e = evals.get(ply.fen);
   const best = e?.lines[0];
@@ -571,45 +759,61 @@ function renderAnalysis(ply, idx) {
   el.evalfill.style.height = `${whiteShare}%`;
   el.evaltext.textContent = t === 'draw' ? '½' : t ? (t === 'w' ? '0-1' : '1-0') : best ? fmtEval(best).replace(/^[+-]/, '') : '';
 
-  drawArrow(t ? null : best?.pv[0]);
+  drawArrow(opts.arrow && !t ? best?.pv[0] : null);
 
-  // Engine lines
+  // Who is winning, then the engine's lines
   const depth = e ? Math.max(0, ...e.lines.filter(Boolean).map((l) => l.depth)) : 0;
-  let html = `<div class="head"><span>Stockfish 16</span><span>${t ? '' : depth ? `depth ${depth}` : 'thinking…'}</span></div>`;
-  if (t) html += `<div class="line">${t === 'draw' ? 'Stalemate.' : 'Checkmate.'}</div>`;
-  for (const line of (e?.lines || []).slice(0, VIEW_LINES)) {
-    if (!line) continue;
-    html += `<div class="line"><span class="ev${winChances(line) < 0 ? ' neg' : ''}">${fmtEval(line)}</span>` +
-      `<span class="pv">${esc(pvToSan(ply.fen, line.pv))}</span></div>`;
+  const summary = t === 'draw' ? 'Stalemate' : t ? `Checkmate · ${t === 'w' ? 'Black' : 'White'} wins`
+    : chances == null ? 'Thinking…' : `${describeAdvantage(chances)} (${fmtEval(best)})`;
+  let html = `<div class="head"><span class="adv">${summary}</span><span>${t || !depth ? '' : `Stockfish 16 · depth ${depth}`}</span></div>`;
+  if (opts.lines && !t) {
+    for (const line of (e?.lines || []).slice(0, opts.multipv)) {
+      if (!line) continue;
+      html += `<div class="line"><span class="ev${winChances(line) < 0 ? ' neg' : ''}">${fmtEval(line)}</span>` +
+        `<span class="pv">${esc(pvToSan(ply.fen, line.pv))}</span></div>`;
+    }
   }
 
   // What the engine thinks of the move that led here
-  const v = idx >= 1 ? verdict(idx) : null;
-  if (v) {
-    const prevFen = state.game.plies[idx - 1].fen;
-    const better = evals.get(prevFen)?.lines[0];
-    const betterSan = better ? toSan(prevFen, better.pv[0]) : null;
-    html += `<div class="note"><span class="v-${v}-t">${VERDICT_WORD[v]}.</span> ${esc(ply.san || ply.lm)} was played` +
-      (betterSan && betterSan !== ply.san ? `; best was <b>${esc(betterSan)}</b> (${fmtEval(better)}).` : '.') + '</div>';
+  if (opts.symbols) {
+    const kind = idx >= 1 ? classify(idx) : null;
+    if (kind) {
+      const prevFen = state.game.plies[idx - 1].fen;
+      const better = evals.get(prevFen)?.lines[0];
+      const betterSan = better ? toSan(prevFen, better.pv[0]) : null;
+      const bad = ['inaccuracy', 'mistake', 'blunder'].includes(kind);
+      html += `<div class="note"><span class="sym k-${kind}">${KINDS[kind].sym}</span> ` +
+        `<b>${esc(ply.san || ply.lm)}</b> is ${kind === 'best' ? 'the best move' : `${/^[aeiou]/i.test(KINDS[kind].word) ? 'an' : 'a'} ${KINDS[kind].word.toLowerCase()}`}` +
+        (bad && betterSan ? `. Best was <b>${esc(betterSan)}</b> (${fmtEval(better)}).` : '.') + '</div>';
+    }
+    html += tallyHtml();
   }
-  html += tallyHtml();
   el.engine.innerHTML = html;
 }
 
 function tallyHtml() {
   const plies = state.game.plies;
   if (plies.length < 2) return '';
-  const count = { white: { inaccuracy: 0, mistake: 0, blunder: 0 }, black: { inaccuracy: 0, mistake: 0, blunder: 0 } };
+  const count = { w: {}, b: {} };
   let checked = 0;
+  let total = 0;
   for (let i = 1; i < plies.length; i++) {
+    if (!plies[i] || !plies[i - 1]) continue;
+    total++;
     if (positionChances(plies[i].fen) == null || positionChances(plies[i - 1].fen) == null) continue;
     checked++;
-    const v = verdict(i);
-    if (v) count[plies[i - 1].fen.split(' ')[1] === 'w' ? 'white' : 'black'][v]++;
+    const kind = classify(i);
+    const side = plies[i - 1].fen.split(' ')[1];
+    if (kind) count[side][kind] = (count[side][kind] || 0) + 1;
   }
-  const side = (c) => `${c === 'white' ? 'White' : 'Black'}: ${count[c].inaccuracy} ?! · ${count[c].mistake} ? · ${count[c].blunder} ??`;
-  const progress = checked < plies.length - 1 ? `<br>Checked ${checked} of ${plies.length - 1} moves…` : '';
-  return `<div class="tally">${side('white')}<br>${side('black')}${progress}</div>`;
+  const names = state.game.info?.players || {};
+  const who = (c) => esc(names[c]?.user?.name || (c === 'white' ? 'White' : 'Black'));
+  let rows = '';
+  for (const [kind, k] of Object.entries(KINDS)) {
+    rows += `<tr><td>${count.w[kind] || 0}</td><td><span class="sym k-${kind}">${k.sym}</span> ${k.word}</td><td>${count.b[kind] || 0}</td></tr>`;
+  }
+  const progress = checked < total ? `<div class="progress">Checked ${checked} of ${total} moves…</div>` : '';
+  return `<table class="tally"><thead><tr><th>${who('white')}</th><th></th><th>${who('black')}</th></tr></thead><tbody>${rows}</tbody></table>${progress}`;
 }
 
 function drawArrow(uci) {
@@ -624,14 +828,8 @@ function drawArrow(uci) {
     svg.innerHTML = '';
     return;
   }
-  const black = (state.orientation === 'black') !== state.flipped;
-  const center = (sq) => {
-    const f = sq.charCodeAt(0) - 97;
-    const r = +sq[1] - 1;
-    return black ? [7 - f + 0.5, r + 0.5] : [f + 0.5, 7 - r + 0.5];
-  };
-  const [x1, y1] = center(uci.slice(0, 2));
-  const [x2, y2] = center(uci.slice(2, 4));
+  const [x1, y1] = squareCenter(uci.slice(0, 2));
+  const [x2, y2] = squareCenter(uci.slice(2, 4));
   const len = Math.hypot(x2 - x1, y2 - y1);
   const ux = (x2 - x1) / len;
   const uy = (y2 - y1) / len;
@@ -640,6 +838,13 @@ function drawArrow(uci) {
   svg.innerHTML =
     `<line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="#2f7fd8" stroke-width="0.17" stroke-linecap="round" opacity="0.8"/>` +
     `<polygon points="${x2},${y2} ${bx - uy * 0.26},${by + ux * 0.26} ${bx + uy * 0.26},${by - ux * 0.26}" fill="#2f7fd8" opacity="0.8"/>`;
+}
+
+function squareCenter(sq) {
+  const black = (state.orientation === 'black') !== state.flipped;
+  const f = sq.charCodeAt(0) - 97;
+  const r = +sq[1] - 1;
+  return black ? [7 - f + 0.5, r + 0.5] : [f + 0.5, 7 - r + 0.5];
 }
 
 function setWaiting(text) {
@@ -651,7 +856,7 @@ function setWaiting(text) {
   }
 }
 
-function renderBoard(ply) {
+function renderBoard(ply, idx) {
   const black = (state.orientation === 'black') !== state.flipped;
   const rows = ply ? ply.fen.split(' ')[0].split('/') : [];
   const grid = rows.map((row) => {
@@ -664,6 +869,13 @@ function renderBoard(ply) {
   });
   const lastSquares = ply?.lm ? [ply.lm.slice(0, 2), ply.lm.slice(2, 4)] : [];
   const checkSquare = ply ? findCheckedKing(ply.fen) : null;
+
+  // The move's symbol sits on the square the piece landed on.
+  let badge = null;
+  if (state.opts.symbols && ply?.lm && idx >= 1 && state.game.plies[idx - 1]) {
+    const kind = classify(idx);
+    if (kind) badge = { kind, square: castleFix(state.game.plies[idx - 1].fen, ply.lm).slice(2, 4) };
+  }
 
   for (let i = 0; i < 64; i++) {
     const r = black ? 7 - Math.floor(i / 8) : Math.floor(i / 8); // 0 = rank 8
@@ -681,6 +893,7 @@ function renderBoard(ply) {
     }
     if (i % 8 === 0) html += `<span class="coord rank">${8 - r}</span>`;
     if (i >= 56) html += `<span class="coord file">${FILES[f]}</span>`;
+    if (badge?.square === name) html += `<span class="badge k-${badge.kind}" title="${KINDS[badge.kind].word}">${KINDS[badge.kind].sym}</span>`;
     if (sq.innerHTML !== html) sq.innerHTML = html;
   }
 }
@@ -723,7 +936,7 @@ function clockFor(game, color, ply, idx) {
   if (raw == null) return { seconds: null, running: false };
   const isLast = idx === game.plies.length - 1;
   const turn = ply.fen.split(' ')[1] === 'w' ? 'white' : 'black';
-  const moves = game.plies.length - 1;
+  const moves = game.base + game.plies.length - 1;
   const running = isLast && !game.over && turn === color && moves >= 2;
   const elapsed = running ? (performance.now() - game.receivedAt) / 1000 : 0;
   return { seconds: Math.max(0, raw - elapsed), running };
@@ -738,18 +951,19 @@ function fmtClock(s) {
   return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 }
 
-let renderedMoves = { id: null, count: 0, cur: -1 };
+let renderedMoves = { id: null, version: -1, count: 0, cur: -1 };
 function renderMoves(idx) {
   const game = state.game;
   const plies = game?.plies || [];
-  if (renderedMoves.id !== game?.id || renderedMoves.count > Math.max(plies.length, 1)) {
+  if (renderedMoves.id !== game?.id || renderedMoves.version !== game?.version || renderedMoves.count > Math.max(plies.length, 1)) {
     el.moves.innerHTML = '';
-    renderedMoves = { id: game?.id, count: 0, cur: -1 };
+    renderedMoves = { id: game?.id, version: game?.version, count: 0, cur: -1 };
   }
-  // Ply 0 is the starting position; moves start at ply 1.
-  const startsWhite = plies[0]?.fen.split(' ')[1] !== 'b';
+  // Ply 0 is the starting position; moves start at ply 1. Gaps (moves still
+  // on their way through the delayed stream) show as "…".
+  const startsWhite = plies[0] ? plies[0].fen.split(' ')[1] !== 'b' : (game?.base ?? 0) % 2 === 0;
   for (let i = Math.max(1, renderedMoves.count); i < plies.length; i++) {
-    const moveNo = Math.floor((i - 1 + (startsWhite ? 0 : 1)) / 2) + 1;
+    const moveNo = Math.floor((i - 1 + (startsWhite ? 0 : 1)) / 2) + 1 + Math.floor((game.base ?? 0) / 2);
     const whiteMove = startsWhite ? i % 2 === 1 : i % 2 === 0;
     if (whiteMove || i === 1) {
       const li = document.createElement('li');
@@ -758,8 +972,14 @@ function renderMoves(idx) {
       el.moves.appendChild(li);
     }
     const btn = document.createElement('button');
-    btn.innerHTML = `${esc(plies[i].san || plies[i].lm)}<span class="mark"></span>`;
-    btn.dataset.ply = i;
+    if (plies[i]) {
+      btn.innerHTML = `${esc(plies[i].san || plies[i].lm || '…')}<span class="mark"></span>`;
+      btn.dataset.ply = i;
+    } else {
+      btn.textContent = '…';
+      btn.disabled = true;
+      btn.title = 'Still on its way from Lichess';
+    }
     el.moves.lastElementChild.appendChild(btn);
   }
   renderedMoves.count = Math.max(plies.length, 1);
@@ -783,13 +1003,13 @@ function renderMoves(idx) {
 function renderMarks() {
   if (!state.game) return;
   for (const btn of el.moves.querySelectorAll('button[data-ply]')) {
-    const v = verdict(+btn.dataset.ply);
-    const cls = v ? `v-${v}` : '';
-    if (btn.dataset.v === cls) continue;
-    btn.dataset.v = cls;
-    btn.classList.remove('v-inaccuracy', 'v-mistake', 'v-blunder');
+    const kind = state.opts.symbols ? classify(+btn.dataset.ply) : null;
+    const cls = kind ? `k-${kind}` : '';
+    if (btn.dataset.k === cls) continue;
+    if (btn.dataset.k) btn.classList.remove(btn.dataset.k);
+    btn.dataset.k = cls;
     if (cls) btn.classList.add(cls);
-    btn.querySelector('.mark').textContent = v ? VERDICT_MARK[v] : '';
+    btn.querySelector('.mark').textContent = kind ? KINDS[kind].sym : '';
   }
 }
 
@@ -842,10 +1062,14 @@ function playMoveSound(san) {
 
 // ---------- navigation ----------
 
-function go(idx) {
-  const n = state.game?.plies.length || 0;
+// Jump to a ply; if it hasn't arrived yet, keep going in the direction of travel.
+function go(idx, dir = -1) {
+  const plies = state.game?.plies || [];
+  const n = plies.length;
   if (!n) return;
   idx = Math.max(0, Math.min(n - 1, idx));
+  while (!plies[idx] && idx > 0 && idx < n - 1) idx += dir;
+  if (!plies[idx]) idx = n - 1;
   state.view = idx === n - 1 ? null : idx;
   scheduleRender();
 }
@@ -862,32 +1086,45 @@ el.moves.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-ply]');
   if (btn) go(+btn.dataset.ply);
 });
-$('first').onclick = () => go(0);
-$('prev').onclick = () => go(currentIndex() - 1);
-$('next').onclick = () => go(currentIndex() + 1);
+$('first').onclick = () => go(0, 1);
+$('prev').onclick = () => go(currentIndex() - 1, -1);
+$('next').onclick = () => go(currentIndex() + 1, 1);
 el.live.onclick = () => { state.view = null; scheduleRender(); };
 el.flip.onclick = () => { state.flipped = !state.flipped; scheduleRender(); };
 el.sound.onclick = () => {
   state.sound = !state.sound;
   el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 };
-
 el.engineToggle.onclick = () => {
   state.analysis = !state.analysis;
   try { localStorage.setItem(ENGINE_KEY, state.analysis ? 'on' : 'off'); } catch { /* optional */ }
   scheduleRender();
 };
+el.bestToggle.onclick = () => {
+  state.opts.arrow = !state.opts.arrow;
+  saveOpts();
+  scheduleRender();
+};
+el.settings.addEventListener('change', (e) => {
+  const input = e.target.closest('[data-opt]');
+  if (!input) return;
+  state.opts[input.dataset.opt] = input.type === 'checkbox' ? input.checked : +input.value;
+  saveOpts();
+  renderedMoves.version = -1;  // redraw the move symbols
+  scheduleRender();
+});
 
 document.addEventListener('keydown', (e) => {
-  if (e.target.closest('input')) return;
+  if (e.target.closest('input, select')) return;
   const keys = {
-    ArrowLeft: () => go(currentIndex() - 1),
-    ArrowRight: () => go(currentIndex() + 1),
-    Home: () => go(0),
+    ArrowLeft: () => $('prev').click(),
+    ArrowRight: () => $('next').click(),
+    Home: () => $('first').click(),
     End: () => el.live.click(),
     f: () => el.flip.click(),
     m: () => el.sound.click(),
     e: () => el.engineToggle.click(),
+    b: () => el.bestToggle.click(),
   };
   if (keys[e.key]) {
     e.preventDefault();
