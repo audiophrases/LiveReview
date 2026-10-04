@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Watch</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Live Watch</h1>
+  <form id="userForm" class="pick">
+    <input id="userInput" placeholder="Lichess username" autocomplete="off" spellcheck="false" aria-label="Lichess username">
+    <button>Watch</button>
+  </form>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div class="bar" id="barTop"></div>
+    <div class="board" id="board"></div>
+    <div class="bar" id="barBottom"></div>
+    <div class="controls">
+      <button id="first" title="First move (Home)">⏮</button>
+      <button id="prev" title="Previous move (←)">◀</button>
+      <button id="next" title="Next move (→)">▶</button>
+      <button id="live" title="Back to live (End)">Live</button>
+      <button id="flip" title="Flip board (F)">Flip</button>
+      <button id="sound" title="Move sound (M)">Sound on</button>
+      <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
+    </div>
+  </section>
+
+  <aside class="side">
+    <p id="status" class="status">Connecting…</p>
+    <div id="meta" class="meta"></div>
+    <ol id="moves" class="moves"></ol>
+  </aside>
+</main>
+
+<footer class="foot">Games stream from the <a href="https://lichess.org/api" target="_blank" rel="noopener">Lichess public API</a>.</footer>
+
+<script src="libs/chess.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
