@@ -293,3 +293,61 @@ a { color: var(--accent); }
 .settings select { margin-left: auto; font: inherit; padding: 1px 4px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
 .controls #bestToggle.on { background: #2f7fd8; border-color: #2f7fd8; color: #fff; }
 .controls button:disabled { opacity: 0.5; cursor: default; }
+
+/* ---------- alternatives, tactics, biggest mistake ---------- */
+.engine .drop {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: #2f7fd8;
+  opacity: 0.75;
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 18px;
+}
+.controls #altToggle.on { background: #5b8baf; border-color: #5b8baf; color: #fff; }
+.controls #tacticsToggle.on { background: #e58f2a; border-color: #e58f2a; color: #fff; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.legend[hidden] { display: none; }
+.legend:not(.threats) .opp { display: none; }
+.legend .key { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.legend .key.capture { background: #e58f2a; }
+.legend .key.check { background: #d6352b; }
+.legend .key.queen { background: #a24bd1; }
+.legend .key.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 8px); }
+
+.worst:empty { display: none; }
+.worst { border-top: 1px solid var(--line); padding: 8px 0; font-size: 13px; }
+.worst-head { color: var(--muted); margin-bottom: 6px; }
+.worst-none { margin: 0; color: var(--muted); }
+.worst-card {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+}
+.worst-card:hover { border-color: var(--accent); }
+.worst-card.cur { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.thumb {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  width: 112px;
+  aspect-ratio: 1;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.thumb .sq { display: block; }
+.thumb .sq.hit::after { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 0 2px var(--k); }
+.worst-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.worst-info .muted { color: var(--muted); }
+@media (max-width: 860px) {
+  .thumb { width: 88px; }
+}

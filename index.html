@@ -33,7 +33,15 @@
       <button id="sound" title="Move sound (M)">Sound on</button>
       <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
       <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
+      <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
+      <button id="tacticsToggle" title="Show captures, checks and attacks on the queen (T)">Tactics</button>
       <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
+    </div>
+    <div id="legend" class="legend" hidden>
+      <span><i class="key capture"></i>Capture</span>
+      <span><i class="key check"></i>Check / mate</span>
+      <span><i class="key queen"></i>Attacks the queen</span>
+      <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
     </div>
   </section>
 
@@ -44,8 +52,12 @@
       <summary>Analysis settings</summary>
       <label><input type="checkbox" data-opt="bar"> Advantage bar</label>
       <label><input type="checkbox" data-opt="arrow"> Best-move arrow</label>
+      <label><input type="checkbox" data-opt="alts"> 2nd and 3rd best moves (with eval drop)</label>
       <label><input type="checkbox" data-opt="lines"> Engine lines</label>
       <label><input type="checkbox" data-opt="symbols"> Move symbols (!! ! ★ !? ?! ? ??)</label>
+      <label><input type="checkbox" data-opt="worst"> Biggest-mistake preview</label>
+      <label><input type="checkbox" data-opt="tactics" data-noengine> Captures, checks and queen attacks</label>
+      <label><input type="checkbox" data-opt="threats" data-noengine> …and the opponent's threats (dashed)</label>
       <label>Depth
         <select data-opt="depth">
           <option value="12">12 (fast)</option><option value="16">16</option><option value="18">18</option>
@@ -60,6 +72,7 @@
       </label>
     </details>
     <div id="engine" class="engine"></div>
+    <div id="worst" class="worst"></div>
     <ol id="moves" class="moves"></ol>
   </aside>
 </main>

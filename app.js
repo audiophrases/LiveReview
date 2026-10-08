@@ -37,6 +37,7 @@ const el = {
   live: $('live'), flip: $('flip'), sound: $('sound'),
   userForm: $('userForm'), userInput: $('userInput'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
+  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), legend: $('legend'), worst: $('worst'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
   evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
@@ -54,7 +55,10 @@ const state = {
   flipped: false,
   sound: true,
   analysis: true,
-  opts: { bar: true, arrow: true, lines: true, symbols: true, depth: 18, multipv: 3 },
+  opts: {
+    bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
+    tactics: false, threats: false, depth: 18, multipv: 3,
+  },
 };
 try {
   state.analysis = localStorage.getItem(ENGINE_KEY) !== 'off';
@@ -495,7 +499,8 @@ function pumpEngine() {
 
   // The position on screen comes first, then a sweep back through the game.
   const viewFen = viewedFen();
-  const { depth, multipv } = state.opts;
+  const { depth } = state.opts;
+  const multipv = Math.max(state.opts.multipv, state.opts.alts ? 3 : 1);
   if (want(viewFen, depth, multipv)) return start(viewFen, depth, multipv);
   for (let i = game.plies.length - 1; i >= 0; i--) {
     const p = game.plies[i];
@@ -589,8 +594,9 @@ function isSacrifice(fen, uci) {
   return result;
 }
 
-// What kind of move produced ply i: one of KINDS, or null for an ordinary good move.
-function classify(i) {
+// Winning chances thrown away by the move that produced ply i, from the mover's
+// point of view (0 = kept everything, up to 2), or null while not analysed yet.
+function moveLoss(i) {
   const plies = state.game?.plies;
   if (!plies || i < 1 || !canAnalyse(state.game)) return null;
   const prev = plies[i - 1];
@@ -599,8 +605,18 @@ function classify(i) {
   const before = positionChances(prev.fen);
   const after = positionChances(cur.fen);
   if (before == null || after == null) return null;
+  return (before - after) * (prev.fen.split(' ')[1] === 'w' ? 1 : -1);
+}
+
+// What kind of move produced ply i: one of KINDS, or null for an ordinary good move.
+function classify(i) {
+  const lost = moveLoss(i);
+  if (lost == null) return null;
+  const prev = state.game.plies[i - 1];
+  const cur = state.game.plies[i];
+  const before = positionChances(prev.fen);
+  const after = positionChances(cur.fen);
   const s = prev.fen.split(' ')[1] === 'w' ? 1 : -1;  // mover's point of view
-  const lost = (before - after) * s;
   if (lost >= 0.3) return 'blunder';
   if (lost >= 0.2) return 'mistake';
   if (lost >= 0.1) return 'inaccuracy';
@@ -617,6 +633,112 @@ function classify(i) {
   if (sac && lost < 0.1) return 'interesting';
   if (isBest) return 'best';
   return null;
+}
+
+// The worst inaccuracy, mistake or blunder either side has played so far: { i, lost, kind }.
+function worstMove() {
+  const plies = state.game?.plies || [];
+  let worst = null;
+  for (let i = 1; i < plies.length; i++) {
+    const lost = moveLoss(i);
+    if (lost != null && lost >= 0.1 && (!worst || lost > worst.lost)) worst = { i, lost };
+  }
+  if (worst) worst.kind = classify(worst.i);
+  return worst;
+}
+
+// The same position with the other side to move (a "null move").
+function passTurn(fen) {
+  const parts = fen.split(' ');
+  parts[1] = parts[1] === 'w' ? 'b' : 'w';
+  parts[3] = '-';
+  return parts.join(' ');
+}
+
+// Squares holding pieces of one type and colour in the position loaded into `chess`.
+function findPieces(type, color) {
+  const out = [];
+  for (const f of FILES) {
+    for (let r = 1; r <= 8; r++) {
+      const p = chess.get(f + r);
+      if (p && p.type === type && p.color === color) out.push(f + r);
+    }
+  }
+  return out;
+}
+
+const KNIGHT_STEPS = [[1, 2], [2, 1], [2, -1], [1, -2], [-1, -2], [-2, -1], [-2, 1], [-1, 2]];
+const KING_STEPS = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+
+// Squares of `color`'s pieces that attack `sq` on a fenGrid board (pins ignored).
+function attackersOf(grid, sq, color) {
+  const f0 = sq.charCodeAt(0) - 97;
+  const r0 = +sq[1] - 1;
+  const at = (f, r) => (f >= 0 && f < 8 && r >= 0 && r < 8 ? grid[7 - r][f] : null);
+  const is = (p, types) => p && (p === p.toUpperCase()) === (color === 'w') && types.includes(p.toLowerCase());
+  const out = [];
+  const add = (f, r) => out.push(FILES[f] + (r + 1));
+  const pawnRank = r0 + (color === 'w' ? -1 : 1);
+  for (const df of [-1, 1]) if (is(at(f0 + df, pawnRank), 'p')) add(f0 + df, pawnRank);
+  for (const [df, dr] of KNIGHT_STEPS) if (is(at(f0 + df, r0 + dr), 'n')) add(f0 + df, r0 + dr);
+  for (const [df, dr] of KING_STEPS) {
+    if (is(at(f0 + df, r0 + dr), 'k')) add(f0 + df, r0 + dr);
+    for (let f = f0 + df, r = r0 + dr; f >= 0 && f < 8 && r >= 0 && r < 8; f += df, r += dr) {
+      const p = grid[7 - r][f];
+      if (!p) continue;
+      if (is(p, df && dr ? 'qb' : 'qr')) add(f, r);
+      break;
+    }
+  }
+  return out;
+}
+
+// A copy of a fenGrid board with a chess.js verbose move played on it.
+function playOnGrid(grid, m) {
+  const g = grid.map((row) => row.slice());
+  const at = (sq) => g[8 - +sq[1]][sq.charCodeAt(0) - 97];
+  const put = (sq, p) => { g[8 - +sq[1]][sq.charCodeAt(0) - 97] = p; };
+  const rank = m.from[1];
+  const piece = m.promotion ? (m.color === 'w' ? m.promotion.toUpperCase() : m.promotion) : at(m.from);
+  put(m.from, null);
+  put(m.to, piece);
+  if (m.flags.includes('e')) put(m.to[0] + rank, null);
+  if (m.flags.includes('k')) { put('f' + rank, at('h' + rank)); put('h' + rank, null); }
+  if (m.flags.includes('q')) { put('d' + rank, at('a' + rank)); put('a' + rank, null); }
+  return g;
+}
+
+// Captures, checks and fresh attacks on the queen open to the side to move:
+// [{ from, to, kind }], kind being 'mate', 'check', 'queen' or 'capture'.
+const TACTIC_RANK = { capture: 1, queen: 2, check: 3, mate: 4 };
+const tacticsCache = new Map();
+function tactics(fen) {
+  if (tacticsCache.has(fen)) return tacticsCache.get(fen);
+  const found = new Map();  // keyed by from+to, so the four promotions count once
+  if (chess.load(fen)) {
+    const me = chess.turn();
+    const grid = fenGrid(fen);
+    const queens = findPieces('q', me === 'w' ? 'b' : 'w');
+    // Pieces already hitting the queen don't count as new attacks.
+    const before = new Set(queens.flatMap((q) => attackersOf(grid, q, me)));
+    for (const m of chess.moves({ verbose: true })) {
+      let kind = m.san.endsWith('#') ? 'mate' : m.san.endsWith('+') ? 'check' : null;
+      if (!kind && queens.length && m.captured !== 'q') {
+        // What hits the queen once the move is made, discovered attacks included.
+        const after = playOnGrid(grid, m);
+        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) kind = 'queen';
+      }
+      if (!kind && m.captured) kind = 'capture';
+      const key = m.from + m.to;
+      if (kind && !(TACTIC_RANK[found.get(key)?.kind] >= TACTIC_RANK[kind])) {
+        found.set(key, { from: m.from, to: m.to, kind });
+      }
+    }
+  }
+  const result = [...found.values()];
+  if (tacticsCache.size > 2000) tacticsCache.clear();
+  tacticsCache.set(fen, result);
+  return result;
 }
 
 function fmtEval(line) {
@@ -702,7 +824,8 @@ function render() {
   renderBars(ply, idx);
   renderMoves(idx);
   renderMeta();
-  renderAnalysis(ply, idx);
+  drawArrows(ply, renderAnalysis(ply, idx));
+  renderWorst(idx);
   renderControls();
   if (game && ply) {
     if (game.over) setStatus([game.result || resultText(game), game.waiting].filter(Boolean).join(' '));
@@ -718,11 +841,16 @@ function renderControls() {
   el.engineToggle.textContent = state.analysis ? 'Engine on' : 'Engine off';
   el.bestToggle.classList.toggle('on', state.opts.arrow);
   el.bestToggle.disabled = !state.analysis;
+  el.altToggle.classList.toggle('on', state.opts.alts);
+  el.altToggle.disabled = !state.analysis;
+  el.tacticsToggle.classList.toggle('on', state.opts.tactics);
+  el.legend.hidden = !state.opts.tactics;
+  el.legend.classList.toggle('threats', state.opts.threats);
   for (const input of el.settings.querySelectorAll('[data-opt]')) {
     const v = state.opts[input.dataset.opt];
     if (input.type === 'checkbox') input.checked = !!v;
     else input.value = String(v);
-    input.disabled = !state.analysis;
+    input.disabled = !state.analysis && !('noengine' in input.dataset);
   }
 }
 
@@ -733,18 +861,15 @@ function renderAnalysis(ply, idx) {
   pumpEngine();
   if (!state.analysis || !ply) {
     el.engine.innerHTML = '';
-    drawArrow(null);
-    return;
+    return [];
   }
   if (engine.failed) {
     el.engine.innerHTML = '<div class="head">Stockfish couldn’t start in this browser.</div>';
-    drawArrow(null);
-    return;
+    return [];
   }
   if (!on) {
     el.engine.innerHTML = `<div class="head">No engine analysis for ${esc(state.game.info.variant.name)}.</div>`;
-    drawArrow(null);
-    return;
+    return [];
   }
 
   // Advantage bar
@@ -759,7 +884,17 @@ function renderAnalysis(ply, idx) {
   el.evalfill.style.height = `${whiteShare}%`;
   el.evaltext.textContent = t === 'draw' ? '½' : t ? (t === 'w' ? '0-1' : '1-0') : best ? fmtEval(best).replace(/^[+-]/, '') : '';
 
-  drawArrow(opts.arrow && !t ? best?.pv[0] : null);
+  // Best move, plus the runners-up labelled with how much they give away.
+  const s = ply.fen.split(' ')[1] === 'w' ? 1 : -1;
+  const arrows = [];
+  if (!t && best) {
+    if (opts.alts) {
+      for (const line of e.lines.slice(1, 3)) {
+        if (line) arrows.push({ uci: line.pv[0], color: BEST_COLOR, width: 0.11, opacity: 0.5, label: dropLabel(best, line, s) });
+      }
+    }
+    if (opts.arrow) arrows.push({ uci: best.pv[0], color: BEST_COLOR, width: 0.17, opacity: 0.8 });
+  }
 
   // Who is winning, then the engine's lines
   const depth = e ? Math.max(0, ...e.lines.filter(Boolean).map((l) => l.depth)) : 0;
@@ -767,11 +902,12 @@ function renderAnalysis(ply, idx) {
     : chances == null ? 'Thinking…' : `${describeAdvantage(chances)} (${fmtEval(best)})`;
   let html = `<div class="head"><span class="adv">${summary}</span><span>${t || !depth ? '' : `Stockfish 16 · depth ${depth}`}</span></div>`;
   if (opts.lines && !t) {
-    for (const line of (e?.lines || []).slice(0, opts.multipv)) {
-      if (!line) continue;
-      html += `<div class="line"><span class="ev${winChances(line) < 0 ? ' neg' : ''}">${fmtEval(line)}</span>` +
+    (e?.lines || []).slice(0, opts.multipv).forEach((line, j) => {
+      if (!line) return;
+      const drop = j && best ? `<span class="drop" title="Compared with the best move">${dropLabel(best, line, s)}</span>` : '';
+      html += `<div class="line"><span class="ev${winChances(line) < 0 ? ' neg' : ''}">${fmtEval(line)}</span>${drop}` +
         `<span class="pv">${esc(pvToSan(ply.fen, line.pv))}</span></div>`;
-    }
+    });
   }
 
   // What the engine thinks of the move that led here
@@ -789,6 +925,78 @@ function renderAnalysis(ply, idx) {
     html += tallyHtml();
   }
   el.engine.innerHTML = html;
+  return arrows;
+}
+
+// How much worse an engine line is than the best one for the side to move
+// (s = 1 for White, -1 for Black), in pawns. With a mate involved, the line's own score.
+function dropLabel(best, alt, s) {
+  if (best.mate != null || alt.mate != null) return fmtEval(alt);
+  const d = Math.max(0, (best.cp - alt.cp) * s) / 100;
+  return d < 0.05 ? '0.0' : `-${d.toFixed(d >= 10 ? 0 : 1)}`;
+}
+
+// The worst move of the game so far as a little board that jumps there when clicked.
+let worstHtml = '';
+function renderWorst(idx) {
+  const game = state.game;
+  let html = '';
+  if (game && state.opts.worst && canAnalyse(game) && game.plies.length > 1) {
+    const head = '<div class="worst-head">Biggest mistake so far</div>';
+    const w = worstMove();
+    if (!w) {
+      html = `${head}<p class="worst-none">No inaccuracies or worse yet.</p>`;
+    } else {
+      const prev = game.plies[w.i - 1];
+      const cur = game.plies[w.i];
+      const better = evals.get(prev.fen)?.lines[0];
+      const color = prev.fen.split(' ')[1] === 'w' ? 'white' : 'black';
+      const name = game.info?.players?.[color]?.user?.name || cap(color);
+      html = head +
+        `<button class="worst-card${idx === w.i ? ' cur' : ''}" data-ply="${w.i}" title="Show this move on the board">` +
+        miniBoardHtml(cur.fen, cur.lm, castleFix(prev.fen, cur.lm).slice(2, 4), w.kind) +
+        '<span class="worst-info">' +
+        `<span><span class="sym k-${w.kind}">${KINDS[w.kind].sym}</span> <b>${esc(moveLabel(w.i))}</b></span>` +
+        `<span class="muted">${esc(name)} · ${KINDS[w.kind].word.toLowerCase()}</span>` +
+        `<span>${evalText(prev.fen)} → ${evalText(cur.fen)}</span>` +
+        (better ? `<span class="muted">Best was <b>${esc(toSan(prev.fen, better.pv[0]))}</b></span>` : '') +
+        '</span></button>';
+    }
+  }
+  if (html !== worstHtml) {
+    el.worst.innerHTML = html;
+    worstHtml = html;
+  }
+}
+
+function miniBoardHtml(fen, lm, hit, kind) {
+  const black = (state.orientation === 'black') !== state.flipped;
+  const grid = fenGrid(fen);
+  const last = lm ? [lm.slice(0, 2), lm.slice(2, 4)] : [];
+  let html = '';
+  for (let i = 0; i < 64; i++) {
+    const r = black ? 7 - Math.floor(i / 8) : Math.floor(i / 8);
+    const f = black ? 7 - (i % 8) : i % 8;
+    const name = FILES[f] + (8 - r);
+    const piece = grid[r]?.[f];
+    html += `<span class="sq${(r + f) % 2 ? ' d' : ''}${last.includes(name) ? ' last' : ''}${name === hit ? ` hit k-${kind}` : ''}">`;
+    if (piece) html += `<img src="pieces/${piece === piece.toUpperCase() ? 'white' : 'black'}-${PIECE_NAMES[piece.toLowerCase()]}.png" alt="">`;
+    html += '</span>';
+  }
+  return `<span class="thumb">${html}</span>`;
+}
+
+// "14…Qxb2" for the move that produced ply i.
+function moveLabel(i) {
+  const [, turn, , , , moveNo] = state.game.plies[i - 1].fen.split(' ');
+  const san = state.game.plies[i].san || state.game.plies[i].lm;
+  return `${moveNo}${turn === 'w' ? '.' : '…'}${san}`;
+}
+
+function evalText(fen) {
+  const t = terminal(fen);
+  if (t) return t === 'draw' ? '½-½' : t === 'w' ? '0-1' : '1-0';
+  return fmtEval(evals.get(fen)?.lines[0]) || '…';
 }
 
 function tallyHtml() {
@@ -816,7 +1024,11 @@ function tallyHtml() {
   return `<table class="tally"><thead><tr><th>${who('white')}</th><th></th><th>${who('black')}</th></tr></thead><tbody>${rows}</tbody></table>${progress}`;
 }
 
-function drawArrow(uci) {
+const BEST_COLOR = '#2f7fd8';
+const TACTIC_COLOR = { capture: '#e58f2a', queen: '#a24bd1', check: '#d6352b', mate: '#d6352b' };
+
+// Tactics underneath (the opponent's threats lowest), engine arrows on top, labels over everything.
+function drawArrows(ply, engineArrows) {
   let svg = el.board.querySelector('svg.arrows');
   if (!svg) {
     svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -824,20 +1036,49 @@ function drawArrow(uci) {
     svg.setAttribute('viewBox', '0 0 8 8');
     el.board.appendChild(svg);
   }
-  if (!uci) {
-    svg.innerHTML = '';
-    return;
+  const list = [];
+  const variant = state.game?.info?.variant?.key || 'standard';
+  if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
+    const add = (fen, dash) => {
+      for (const t of tactics(fen)) {
+        list.push({ from: t.from, to: t.to, color: TACTIC_COLOR[t.kind], width: t.kind === 'mate' ? 0.14 : 0.1, opacity: dash ? 0.55 : 0.85, dash });
+      }
+    };
+    // Passing the turn is meaningless while the side to move is in check.
+    if (state.opts.threats && !findCheckedKing(ply.fen)) add(passTurn(ply.fen), true);
+    add(ply.fen, false);
   }
-  const [x1, y1] = squareCenter(uci.slice(0, 2));
-  const [x2, y2] = squareCenter(uci.slice(2, 4));
+  for (const a of engineArrows) list.push({ ...a, from: a.uci.slice(0, 2), to: a.uci.slice(2, 4) });
+  const labels = [];
+  svg.innerHTML = list.map((a) => arrowSvg(a, labels)).join('') + labels.map((l) => l.svg).join('');
+}
+
+function arrowSvg(a, labels) {
+  const [x1, y1] = squareCenter(a.from);
+  const [x2, y2] = squareCenter(a.to);
   const len = Math.hypot(x2 - x1, y2 - y1);
   const ux = (x2 - x1) / len;
   const uy = (y2 - y1) / len;
-  const bx = x2 - ux * 0.42;
-  const by = y2 - uy * 0.42;
-  svg.innerHTML =
-    `<line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="#2f7fd8" stroke-width="0.17" stroke-linecap="round" opacity="0.8"/>` +
-    `<polygon points="${x2},${y2} ${bx - uy * 0.26},${by + ux * 0.26} ${bx + uy * 0.26},${by - ux * 0.26}" fill="#2f7fd8" opacity="0.8"/>`;
+  const head = a.width * 2.5;
+  const half = a.width * 1.55;
+  const bx = x2 - ux * head;
+  const by = y2 - uy * head;
+  const dash = a.dash ? ` stroke-dasharray="${a.width * 2} ${a.width * 1.5}"` : '';
+  if (a.label) {
+    // A pill just below the target square's centre, moved above it if that spot is taken.
+    let ly = y2 + 0.3;
+    if (labels.some((l) => l.x === x2 && l.y === ly)) ly = y2 - 0.3;
+    ly = Math.min(7.82, Math.max(0.18, ly));
+    const w = 0.16 + a.label.length * 0.13;
+    labels.push({
+      x: x2, y: ly,
+      svg: `<rect x="${x2 - w / 2}" y="${ly - 0.16}" width="${w}" height="0.32" rx="0.16" fill="${a.color}" stroke="#fff" stroke-width="0.03"/>` +
+        `<text x="${x2}" y="${ly}" font-size="0.22" font-weight="700" font-family="system-ui, sans-serif" fill="#fff" text-anchor="middle" dominant-baseline="central">${esc(a.label)}</text>`,
+    });
+  }
+  return `<g opacity="${a.opacity}">` +
+    `<line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="${a.color}" stroke-width="${a.width}" stroke-linecap="${a.dash ? 'butt' : 'round'}"${dash}/>` +
+    `<polygon points="${x2},${y2} ${bx - uy * half},${by + ux * half} ${bx + uy * half},${by - ux * half}" fill="${a.color}"/></g>`;
 }
 
 function squareCenter(sq) {
@@ -858,15 +1099,7 @@ function setWaiting(text) {
 
 function renderBoard(ply, idx) {
   const black = (state.orientation === 'black') !== state.flipped;
-  const rows = ply ? ply.fen.split(' ')[0].split('/') : [];
-  const grid = rows.map((row) => {
-    const out = [];
-    for (const ch of row) {
-      if (/\d/.test(ch)) for (let k = 0; k < +ch; k++) out.push(null);
-      else out.push(ch);
-    }
-    return out;
-  });
+  const grid = ply ? fenGrid(ply.fen) : [];
   const lastSquares = ply?.lm ? [ply.lm.slice(0, 2), ply.lm.slice(2, 4)] : [];
   const checkSquare = ply ? findCheckedKing(ply.fen) : null;
 
@@ -898,16 +1131,21 @@ function renderBoard(ply, idx) {
   }
 }
 
+// Rows of the board from rank 8 down, each a list of piece letters or null.
+function fenGrid(fen) {
+  return fen.split(' ')[0].split('/').map((row) => {
+    const out = [];
+    for (const ch of row) {
+      if (/\d/.test(ch)) for (let k = 0; k < +ch; k++) out.push(null);
+      else out.push(ch);
+    }
+    return out;
+  });
+}
+
 function findCheckedKing(fen) {
   if (!chess.load(fen) || !chess.in_check()) return null;
-  const turn = chess.turn();
-  for (const f of FILES) {
-    for (let r = 1; r <= 8; r++) {
-      const p = chess.get(f + r);
-      if (p && p.type === 'k' && p.color === turn) return f + r;
-    }
-  }
-  return null;
+  return findPieces('k', chess.turn())[0] || null;
 }
 
 function renderBars(ply, idx) {
@@ -1100,11 +1338,18 @@ el.engineToggle.onclick = () => {
   try { localStorage.setItem(ENGINE_KEY, state.analysis ? 'on' : 'off'); } catch { /* optional */ }
   scheduleRender();
 };
-el.bestToggle.onclick = () => {
-  state.opts.arrow = !state.opts.arrow;
+function toggleOpt(name) {
+  state.opts[name] = !state.opts[name];
   saveOpts();
   scheduleRender();
-};
+}
+el.bestToggle.onclick = () => toggleOpt('arrow');
+el.altToggle.onclick = () => toggleOpt('alts');
+el.tacticsToggle.onclick = () => toggleOpt('tactics');
+el.worst.addEventListener('click', (e) => {
+  const card = e.target.closest('[data-ply]');
+  if (card) go(+card.dataset.ply);
+});
 el.settings.addEventListener('change', (e) => {
   const input = e.target.closest('[data-opt]');
   if (!input) return;
@@ -1125,6 +1370,8 @@ document.addEventListener('keydown', (e) => {
     m: () => el.sound.click(),
     e: () => el.engineToggle.click(),
     b: () => el.bestToggle.click(),
+    a: () => el.altToggle.click(),
+    t: () => el.tacticsToggle.click(),
   };
   if (keys[e.key]) {
     e.preventDefault();
