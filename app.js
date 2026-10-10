@@ -273,14 +273,29 @@ function watchFolder(handle) {
   pollFolder(state.folder);
 }
 
+// File names start with the time the game began (yyyymmddhhmm), so the newest game
+// has the greatest name. Files without that prefix rank below, ordered by modified time.
 async function newestJsonl(dir) {
   let best = null;
+  let bestKey = null;
   for await (const [name, h] of dir.entries()) {
     if (h.kind !== 'file' || !name.toLowerCase().endsWith('.jsonl')) continue;
     const file = await h.getFile();
-    if (!best || file.lastModified > best.file.lastModified) best = { name, file };
+    const stamp = /^\d{12}/.exec(name)?.[0] || '';
+    const key = [stamp, stamp ? name : '', file.lastModified];
+    if (!best || compareKeys(key, bestKey) > 0) {
+      best = { name, file };
+      bestKey = key;
+    }
   }
   return best;
+}
+
+function compareKeys(a, b) {
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1;
+  }
+  return 0;
 }
 
 async function pollFolder(f) {
