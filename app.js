@@ -20,7 +20,7 @@ const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
 const SWEEP_LINES = 2;
 const ANALYSABLE = ['standard', 'fromPosition', 'chess960'];
 
-const FOLDER_POLL_MS = 1000;
+const FOLDER_POLL_MS = 200;
 
 const KINDS = {
   brilliant: { sym: '!!', word: 'Brilliant' },
