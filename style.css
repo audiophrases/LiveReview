@@ -67,12 +67,16 @@ a { color: var(--accent); }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 640px) minmax(240px, 340px);
-  gap: 20px;
-  justify-content: center;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "stage" "analysis" "moves";
+  gap: 16px;
   padding: 16px;
+  max-width: 1900px;
+  margin: 0 auto;
 }
-.stage, .side { min-width: 0; }
+.stage { grid-area: stage; min-width: 0; }
+.analysis { grid-area: analysis; }
+.movespanel { grid-area: moves; }
 
 .bar {
   display: flex;
@@ -129,23 +133,24 @@ a { color: var(--accent); }
 .controls a { margin-left: auto; }
 
 .side {
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
-  display: flex;
-  flex-direction: column;
-  max-height: calc(100vh - 120px);
-  min-height: 300px;
 }
-.status { margin: 0 0 6px; font-weight: 600; }
-.meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+.status { margin: 0 0 4px; font-weight: 600; }
+.meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.movestitle { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.movespanel { display: flex; flex-direction: column; }
 .moves {
   list-style: none;
   margin: 0;
   padding: 0;
   overflow-y: auto;
   flex: 1;
+  min-height: 0;
+  max-height: 320px;
   display: grid;
   grid-template-columns: 36px 1fr 1fr;
   align-content: start;
@@ -163,14 +168,65 @@ a { color: var(--accent); }
 }
 .moves button.cur { background: var(--accent); color: #fff; }
 
+/* collapsible sections */
+.sec { border-top: 1px solid var(--line); }
+.sec[hidden] { display: none; }
+.sec > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+.sec > summary::-webkit-details-marker { display: none; }
+.sec > summary::before { content: "▸"; font-size: 11px; transition: transform 0.15s; }
+.sec[open] > summary::before { transform: rotate(90deg); }
+.sec > summary:hover { color: var(--text); }
+.sec-body { padding: 0 0 10px; }
+
 .foot { text-align: center; color: var(--muted); font-size: 12px; padding: 8px 16px 20px; }
 
 @media (max-width: 860px) {
-  .layout { grid-template-columns: minmax(0, 1fr); }
-  .side { max-height: 320px; }
-  .pick { flex: 1; min-width: 0; }
+  .top .pick { order: 3; flex: 1 1 100%; min-width: 0; margin-left: 0; }
+  .pickfolder { margin-left: auto; }
   .pick input { flex: 1; width: auto; min-width: 0; }
   .controls a { margin-left: 0; }
+  .moves { max-height: 240px; }
+}
+
+/* two columns: board on the left, analysis over moves on the right */
+@media (min-width: 861px) {
+  .layout {
+    grid-template-columns: minmax(0, 700px) minmax(300px, 420px);
+    grid-template-areas: "stage analysis" "stage moves";
+    justify-content: center;
+    align-items: start;
+  }
+  .moves { max-height: 360px; }
+}
+
+/* three columns on wide screens; the side panels stay in view while the page scrolls */
+@media (min-width: 1250px) {
+  .layout {
+    grid-template-columns: clamp(480px, calc(100vh - 200px), 800px) minmax(320px, 460px) minmax(220px, 320px);
+    grid-template-areas: "stage analysis moves";
+  }
+  .analysis, .movespanel {
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 100px);
+  }
+  .analysis { overflow-y: auto; }
+  .movespanel { height: calc(100vh - 100px); }
+  .moves { max-height: none; }
+  .moves button { padding: 4px 8px; }
 }
 
 /* ---------- analysis ---------- */
@@ -180,6 +236,7 @@ a { color: var(--accent); }
 .evalbar {
   position: relative;
   background: #3b3935;
+  border: 1px solid var(--line);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -206,12 +263,7 @@ a { color: var(--accent); }
 .board { position: relative; }
 .board svg.arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
-.engine:empty { display: none; }
-.engine {
-  border-top: 1px solid var(--line);
-  padding: 8px 0;
-  font-size: 13px;
-}
+.engine { font-size: 13px; }
 .engine .head { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
 .engine .line { display: flex; gap: 8px; padding: 2px 0; white-space: nowrap; overflow: hidden; }
 .engine .line .pv { overflow: hidden; text-overflow: ellipsis; }
@@ -281,15 +333,14 @@ a { color: var(--accent); }
 
 .engine .head .adv { font-weight: 700; color: var(--text); }
 .engine .note { margin-top: 8px; }
-.tally { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 12px; }
+.tally { width: 100%; margin-top: 0; border-collapse: collapse; font-size: 12px; }
 .tally th { font-weight: 600; color: var(--muted); padding: 2px 4px; overflow: hidden; text-overflow: ellipsis; max-width: 90px; }
 .tally td { padding: 2px 4px; }
 .tally td:first-child, .tally td:last-child { text-align: center; width: 48px; font-weight: 700; }
 .tally td:nth-child(2) { color: var(--muted); }
 .engine .progress { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
-.settings { border-top: 1px solid var(--line); padding: 6px 0; font-size: 13px; }
-.settings summary { cursor: pointer; color: var(--muted); }
+.settings { font-size: 13px; }
 .settings label { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
 .settings select { margin-left: auto; font: inherit; padding: 1px 4px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
 .controls #bestToggle.on { background: #2f7fd8; border-color: #2f7fd8; color: #fff; }
@@ -319,9 +370,7 @@ a { color: var(--accent); }
 .legend .key.queen { background: #a24bd1; }
 .legend .key.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 8px); }
 
-.worst:empty { display: none; }
-.worst { border-top: 1px solid var(--line); padding: 8px 0; font-size: 13px; }
-.worst-head { color: var(--muted); margin-bottom: 6px; }
+.worst { font-size: 13px; }
 .worst-none { margin: 0; color: var(--muted); }
 .worst-card {
   display: flex;
@@ -352,3 +401,4 @@ a { color: var(--accent); }
 @media (max-width: 860px) {
   .thumb { width: 88px; }
 }
+.worst-card.cur::after { content: "on the board"; align-self: flex-start; margin-left: auto; font-size: 11px; color: var(--accent); white-space: nowrap; }

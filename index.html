@@ -46,11 +46,26 @@
     </div>
   </section>
 
-  <aside class="side">
-    <p id="status" class="status">Connecting…</p>
-    <div id="meta" class="meta"></div>
-    <details id="settings" class="settings">
-      <summary>Analysis settings</summary>
+  <aside class="side analysis" id="analysis">
+    <div class="head-block">
+      <p id="status" class="status">Connecting…</p>
+      <div id="meta" class="meta"></div>
+    </div>
+    <details class="sec" data-sec="worst" open>
+      <summary><span class="t">Biggest mistake</span></summary>
+      <div class="sec-body"><div id="worst" class="worst"></div></div>
+    </details>
+    <details class="sec" data-sec="engine" open>
+      <summary><span class="t">Engine</span></summary>
+      <div class="sec-body"><div id="engine" class="engine"></div></div>
+    </details>
+    <details class="sec" data-sec="tally" open>
+      <summary><span class="t">Move summary</span></summary>
+      <div class="sec-body"><div id="tally"></div></div>
+    </details>
+    <details id="settings" class="settings sec" data-sec="settings">
+      <summary><span class="t">Analysis settings</span></summary>
+      <div class="sec-body">
       <label><input type="checkbox" data-opt="bar"> Advantage bar</label>
       <label><input type="checkbox" data-opt="arrow"> Best-move arrow</label>
       <label><input type="checkbox" data-opt="alts"> 2nd and 3rd best moves (with eval drop)</label>
@@ -71,9 +86,12 @@
           <option value="4">4</option><option value="5">5</option>
         </select>
       </label>
+      </div>
     </details>
-    <div id="engine" class="engine"></div>
-    <div id="worst" class="worst"></div>
+  </aside>
+
+  <aside class="side movespanel" id="movespanel">
+    <h2 class="movestitle">Moves</h2>
     <ol id="moves" class="moves"></ol>
   </aside>
 </main>

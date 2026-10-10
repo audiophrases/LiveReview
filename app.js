@@ -39,7 +39,7 @@ const el = {
   live: $('live'), flip: $('flip'), sound: $('sound'),
   userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
-  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), legend: $('legend'), worst: $('worst'),
+  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), legend: $('legend'), worst: $('worst'), tally: $('tally'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
   evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
@@ -1014,6 +1014,8 @@ function render() {
   renderMeta();
   drawArrows(ply, renderAnalysis(ply, idx));
   renderWorst(idx);
+  renderTally();
+  syncSections();
   renderControls();
   if (game && ply) {
     if (game.source && !game.over) setStatus(state.view != null ? 'Reviewing. Press Live to catch up.' : `Live · following ${game.source}`);
@@ -1111,7 +1113,6 @@ function renderAnalysis(ply, idx) {
         `<b>${esc(ply.san || ply.lm)}</b> is ${kind === 'best' ? 'the best move' : `${/^[aeiou]/i.test(KINDS[kind].word) ? 'an' : 'a'} ${KINDS[kind].word.toLowerCase()}`}` +
         (bad && betterSan ? `. Best was <b>${esc(betterSan)}</b> (${fmtEval(better)}).` : '.') + '</div>';
     }
-    html += tallyHtml();
   }
   el.engine.innerHTML = html;
   return arrows;
@@ -1131,17 +1132,16 @@ function renderWorst(idx) {
   const game = state.game;
   let html = '';
   if (game && state.opts.worst && canAnalyse(game) && game.plies.length > 1) {
-    const head = '<div class="worst-head">Biggest mistake so far</div>';
     const w = worstMove();
     if (!w) {
-      html = `${head}<p class="worst-none">No inaccuracies or worse yet.</p>`;
+      html = '<p class="worst-none">No inaccuracies or worse yet.</p>';
     } else {
       const prev = game.plies[w.i - 1];
       const cur = game.plies[w.i];
       const better = evals.get(prev.fen)?.lines[0];
       const color = prev.fen.split(' ')[1] === 'w' ? 'white' : 'black';
       const name = game.info?.players?.[color]?.user?.name || cap(color);
-      html = head +
+      html =
         `<button class="worst-card${idx === w.i ? ' cur' : ''}" data-ply="${w.i}" title="Show this move on the board">` +
         miniBoardHtml(cur.fen, cur.lm, castleFix(prev.fen, cur.lm).slice(2, 4), w.kind) +
         '<span class="worst-info">' +
@@ -1186,6 +1186,35 @@ function evalText(fen) {
   const t = terminal(fen);
   if (t) return t === 'draw' ? '½-½' : t === 'w' ? '0-1' : '1-0';
   return fmtEval(evals.get(fen)?.lines[0]) || '…';
+}
+
+let tallyCache = '';
+function renderTally() {
+  const game = state.game;
+  const html = game && state.analysis && state.opts.symbols && canAnalyse(game) ? tallyHtml() : '';
+  if (html !== tallyCache) {
+    el.tally.innerHTML = html;
+    tallyCache = html;
+  }
+}
+
+// Sections with nothing to show (feature off, no game yet) disappear instead of leaving an empty title.
+function syncSections() {
+  for (const box of [el.worst, el.engine, el.tally]) box.closest('.sec').hidden = !box.innerHTML;
+}
+
+// Remember which sections are open.
+const SECTIONS_KEY = 'livewatch.sections';
+function initSections() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SECTIONS_KEY) || '{}'); } catch { /* optional */ }
+  for (const d of document.querySelectorAll('details.sec')) {
+    if (d.dataset.sec in saved) d.open = saved[d.dataset.sec];
+    d.addEventListener('toggle', () => {
+      saved[d.dataset.sec] = d.open;
+      try { localStorage.setItem(SECTIONS_KEY, JSON.stringify(saved)); } catch { /* optional */ }
+    });
+  }
 }
 
 function tallyHtml() {
@@ -1578,6 +1607,7 @@ setInterval(() => {
   }
 }, 100);
 
+initSections();
 buildBoard();
 render();
 
