@@ -47,6 +47,7 @@ a { color: var(--accent); }
 }
 .top h1 { font-size: 18px; margin: 0 8px 0 0; }
 .pick { display: flex; gap: 4px; margin-left: auto; }
+.pickfolder { margin-left: 8px; }
 .pick input {
   width: 200px;
   padding: 5px 8px;
@@ -54,7 +55,7 @@ a { color: var(--accent); }
   border-radius: 6px;
   background: var(--bg);
 }
-.pick button, .controls button, .controls a {
+.pick button, .pickfolder, .controls button, .controls a {
   padding: 5px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;

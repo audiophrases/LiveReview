@@ -20,6 +20,8 @@ const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
 const SWEEP_LINES = 2;
 const ANALYSABLE = ['standard', 'fromPosition', 'chess960'];
 
+const FOLDER_POLL_MS = 1000;
+
 const KINDS = {
   brilliant: { sym: '!!', word: 'Brilliant' },
   great: { sym: '!', word: 'Great move' },
@@ -35,7 +37,7 @@ const el = {
   board: $('board'), barTop: $('barTop'), barBottom: $('barBottom'),
   status: $('status'), meta: $('meta'), moves: $('moves'), open: $('open'),
   live: $('live'), flip: $('flip'), sound: $('sound'),
-  userForm: $('userForm'), userInput: $('userInput'),
+  userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
   altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), legend: $('legend'), worst: $('worst'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
@@ -49,6 +51,7 @@ const state = {
   tvCtrl: null,        // AbortController for the TV channel feed, while the game is featured
   pollTimer: null,
   tvTimer: null,
+  folder: null,        // { handle, timer, file, mtime, size, lines } while following a folder of .jsonl files
   game: null,
   view: null,          // ply index being viewed, or null to follow live
   orientation: 'white',
@@ -99,6 +102,7 @@ function isAbort(err) {
 // ---------- following a player ----------
 
 function watchUser(name) {
+  stopFolder();
   state.session++;
   closeGame();
   clearTimeout(state.pollTimer);
@@ -223,6 +227,175 @@ function finish(game) {
   game.over = true;
   game.result = resultText(game);
   if (state.game === game) stopTv();
+}
+
+// ---------- following a folder of .jsonl files ----------
+// Another program appends one JSON object per line as a game goes on:
+//   { t, fen, turn, playerColor, gameUrl }
+// We follow the newest .jsonl file in a folder the user picks each time.
+
+async function pickFolder() {
+  if (!window.showDirectoryPicker) {
+    setStatus('Your browser can’t open folders. Use Chrome, Edge or another Chromium browser (served from localhost).');
+    return;
+  }
+  let handle;
+  try {
+    handle = await window.showDirectoryPicker({ mode: 'read' });
+  } catch {
+    return;  // cancelled
+  }
+  watchFolder(handle);
+}
+
+function stopFolder() {
+  if (state.folder) clearTimeout(state.folder.timer);
+  state.folder = null;
+  el.open.textContent = 'Open on Lichess';
+}
+
+function watchFolder(handle) {
+  state.session++;
+  closeGame();
+  clearTimeout(state.pollTimer);
+  stopFolder();
+  state.user = null;
+  state.game = null;
+  state.view = null;
+  state.flipped = false;
+  state.folder = { handle, timer: null, file: null, mtime: 0, size: -1, lines: 0 };
+  el.userInput.value = '';
+  el.open.removeAttribute('href');
+  history.replaceState(null, '', location.pathname);
+  document.title = `${handle.name} · Live Watch`;
+  setStatus(`Looking for .jsonl files in ${handle.name}…`);
+  scheduleRender();
+  pollFolder(state.folder);
+}
+
+async function newestJsonl(dir) {
+  let best = null;
+  for await (const [name, h] of dir.entries()) {
+    if (h.kind !== 'file' || !name.toLowerCase().endsWith('.jsonl')) continue;
+    const file = await h.getFile();
+    if (!best || file.lastModified > best.file.lastModified) best = { name, file };
+  }
+  return best;
+}
+
+async function pollFolder(f) {
+  try {
+    const found = await newestJsonl(f.handle);
+    if (state.folder !== f) return;
+    if (!found) {
+      if (!state.game) setStatus(`No .jsonl files in ${f.handle.name} yet. Waiting…`);
+    } else {
+      const { name, file } = found;
+      if (name !== f.file || file.lastModified !== f.mtime || file.size !== f.size) {
+        const text = await file.text();
+        if (state.folder !== f) return;
+        const sameFile = name === f.file;
+        f.file = name;
+        f.mtime = file.lastModified;
+        f.size = file.size;
+        loadJsonl(f, text, sameFile);
+      }
+    }
+  } catch (err) {
+    if (state.folder !== f) return;
+    setStatus(`Could not read ${f.handle.name}: ${err.message || err}`);
+  }
+  if (state.folder === f) f.timer = setTimeout(() => pollFolder(f), FOLDER_POLL_MS);
+}
+
+function loadJsonl(f, text, sameFile) {
+  const rows = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      rows.push(JSON.parse(line));
+    } catch {
+      if (i < lines.length - 1) rows.push(null);  // corrupt line in the middle: skip it
+      // a half-written last line is left for the next read
+    }
+  }
+  const done = rows.length;
+  let game = state.game;
+  // A different file, a shorter file, or a position that goes back in time means a new game.
+  const restart = !game || game.source !== f.file || !sameFile || done < f.lines;
+  if (restart) {
+    const first = rows.find((r) => r?.fen);
+    if (!first) return;
+    game = newFileGame(f.file, first);
+    state.game = game;
+    state.view = null;
+    evals.clear();
+    f.lines = 0;
+  }
+  const rowsNow = rows.slice(f.lines);
+  f.lines = done;
+  for (const row of rowsNow) {
+    if (!row?.fen) continue;
+    if (row.playerColor === 'white' || row.playerColor === 'black') applyPlayerColor(game, row.playerColor);
+    if (row.gameUrl && row.gameUrl !== game.url) {
+      game.url = row.gameUrl;
+      el.open.href = row.gameUrl;
+    }
+    const ply = fenPly(row.fen);
+    const prev = game.plies[ply - game.base - 1];
+    // A snapshot is the position only; work out the move that led to it.
+    addPosition(game, { fen: row.fen, lm: prev ? inferMove(prev.fen, row.fen) : null });
+  }
+  const last = game.plies[game.plies.length - 1];
+  const t = last && terminal(last.fen);
+  if (t && !game.over) {
+    game.over = true;
+    game.result = t === 'draw' ? '½-½ · Stalemate.' : `${t === 'w' ? '0-1' : '1-0'} · Checkmate.`;
+  } else if (!t && game.over) {
+    game.over = false;
+    game.result = null;
+  }
+  game.version++;
+  scheduleRender();
+}
+
+function newFileGame(name, first) {
+  el.open.textContent = 'Open game';
+  el.open.removeAttribute('href');
+  const game = {
+    id: `file:${name}:${Date.now()}`, source: name, url: null,
+    info: { variant: { key: 'standard', name: 'Standard' }, players: {}, fileName: name },
+    plies: [], base: null, over: false, result: null,
+    receivedAt: 0, lastLineAt: 0, waiting: null, version: 0, realtime: false,
+  };
+  applyPlayerColor(game, first.playerColor);
+  return game;
+}
+
+function applyPlayerColor(game, color) {
+  if (color !== 'white' && color !== 'black') return;
+  if (game.info.playerColor === color) return;
+  game.info.playerColor = color;
+  game.info.players = {
+    white: { user: { name: color === 'white' ? 'You' : 'Opponent' } },
+    black: { user: { name: color === 'black' ? 'You' : 'Opponent' } },
+  };
+  state.orientation = color;
+}
+
+// The move that turns one position into the next, as UCI, or null if it isn't a single legal move.
+function inferMove(prevFen, fen) {
+  if (!chess.load(prevFen)) return null;
+  const want = fen.split(' ').slice(0, 2).join(' ');
+  for (const m of chess.moves({ verbose: true })) {
+    chess.move(m);
+    const got = chess.fen().split(' ').slice(0, 2).join(' ');
+    chess.undo();
+    if (got === want) return m.from + m.to + (m.promotion || '');
+  }
+  return null;
 }
 
 // ---------- real-time moves from Lichess TV ----------
@@ -828,7 +1001,8 @@ function render() {
   renderWorst(idx);
   renderControls();
   if (game && ply) {
-    if (game.over) setStatus([game.result || resultText(game), game.waiting].filter(Boolean).join(' '));
+    if (game.source && !game.over) setStatus(state.view != null ? 'Reviewing. Press Live to catch up.' : `Live · following ${game.source}`);
+    else if (game.over) setStatus([game.result || resultText(game), game.waiting].filter(Boolean).join(' '));
     else if (state.view != null) setStatus('Reviewing. Press Live to catch up.');
     else if (game.realtime) setStatus('Live · real time (featured on Lichess TV)');
     else setStatus('Live · Lichess shows spectators each move 3 plies late');
@@ -1261,7 +1435,8 @@ function renderMeta() {
   if (info.clock) parts.push(`${info.clock.initial / 60}+${info.clock.increment}`);
   if (info.speed) parts.push(cap(info.speed));
   if (info.variant && info.variant.key !== 'standard') parts.push(info.variant.name);
-  parts.push(info.rated ? 'Rated' : 'Casual');
+  if (info.fileName) parts.push(info.fileName);
+  else parts.push(info.rated ? 'Rated' : 'Casual');
   el.meta.textContent = parts.join(' · ');
 }
 
@@ -1320,6 +1495,7 @@ el.userForm.addEventListener('submit', (e) => {
   if (/^[A-Za-z0-9_-]{2,30}$/.test(name)) watchUser(name);
   else setStatus('That doesn’t look like a Lichess username.');
 });
+el.folderBtn.onclick = pickFolder;
 el.moves.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-ply]');
   if (btn) go(+btn.dataset.ply);
