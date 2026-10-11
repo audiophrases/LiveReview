@@ -60,7 +60,7 @@ const state = {
   analysis: true,
   opts: {
     bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
-    tactics: false, threats: false, depth: 18, multipv: 3,
+    tactics: false, simple: true, threats: false, depth: 18, multipv: 3,
   },
 };
 try {
@@ -929,6 +929,47 @@ function tactics(fen) {
   return result;
 }
 
+// The few tactics worth a glance, chess.com style: mate in one, pieces left hanging
+// and captures that win material even though the target is defended.
+// [{ from, to, kind }], kind being 'mate', 'hanging' or 'trade'; best first, at most SIMPLE_MAX.
+const SIMPLE_MAX = 3;
+const SIMPLE_RANK = { trade: 1, hanging: 2, mate: 3 };
+const simpleCache = new Map();
+function simpleTactics(fen) {
+  if (simpleCache.has(fen)) return simpleCache.get(fen);
+  const found = [];
+  if (chess.load(fen)) {
+    const me = chess.turn();
+    const grid = fenGrid(fen);
+    for (const m of chess.moves({ verbose: true })) {
+      let kind = m.san.endsWith('#') ? 'mate' : null;
+      let gain = 100;
+      if (!kind && m.captured && !m.flags.includes('e')) {
+        const target = VALUE[m.captured];
+        const attacker = VALUE[m.piece];
+        if (target >= 3) {
+          if (!attackersOf(grid, m.to, me === 'w' ? 'b' : 'w').length) { kind = 'hanging'; gain = target; }
+          else if (target - attacker >= 2) { kind = 'trade'; gain = target - attacker; }
+        }
+      }
+      if (!kind) continue;
+      // Of several pieces that can take the same target, the cheapest one makes the arrow.
+      const old = found.find((f) => f.to === m.to && f.kind === kind);
+      const cost = VALUE[m.piece];
+      if (old) {
+        if (cost < old.cost) Object.assign(old, { from: m.from, cost });
+      } else if (!found.some((f) => f.from === m.from && f.to === m.to)) {
+        found.push({ from: m.from, to: m.to, kind, gain, cost });
+      }
+    }
+  }
+  found.sort((a, b) => SIMPLE_RANK[b.kind] - SIMPLE_RANK[a.kind] || b.gain - a.gain);
+  const result = found.slice(0, SIMPLE_MAX).map(({ from, to, kind }) => ({ from, to, kind }));
+  if (simpleCache.size > 2000) simpleCache.clear();
+  simpleCache.set(fen, result);
+  return result;
+}
+
 function fmtEval(line) {
   if (!line) return '';
   if (line.mate != null) return `${line.mate > 0 ? '' : '-'}M${Math.abs(line.mate)}`;
@@ -1037,6 +1078,7 @@ function renderControls() {
   el.tacticsToggle.classList.toggle('on', state.opts.tactics);
   el.legend.hidden = !state.opts.tactics;
   el.legend.classList.toggle('threats', state.opts.threats);
+  el.legend.classList.toggle('simple', state.opts.simple);
   for (const input of el.settings.querySelectorAll('[data-opt]')) {
     const v = state.opts[input.dataset.opt];
     if (input.type === 'checkbox') input.checked = !!v;
@@ -1243,7 +1285,7 @@ function tallyHtml() {
 }
 
 const BEST_COLOR = '#2f7fd8';
-const TACTIC_COLOR = { capture: '#e58f2a', queen: '#a24bd1', check: '#d6352b', mate: '#d6352b' };
+const TACTIC_COLOR = { hanging: '#e58f2a', trade: '#2e9d57', capture: '#e58f2a', queen: '#a24bd1', check: '#d6352b', mate: '#d6352b' };
 
 // Tactics underneath (the opponent's threats lowest), engine arrows on top, labels over everything.
 function drawArrows(ply, engineArrows) {
@@ -1258,7 +1300,7 @@ function drawArrows(ply, engineArrows) {
   const variant = state.game?.info?.variant?.key || 'standard';
   if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
     const add = (fen, dash) => {
-      for (const t of tactics(fen)) {
+      for (const t of (state.opts.simple ? simpleTactics(fen) : tactics(fen))) {
         list.push({ from: t.from, to: t.to, color: TACTIC_COLOR[t.kind], width: t.kind === 'mate' ? 0.14 : 0.1, opacity: dash ? 0.55 : 0.85, dash });
       }
     };

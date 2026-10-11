@@ -367,6 +367,8 @@ a { color: var(--accent); }
 .legend .key { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
 .legend .key.capture { background: #e58f2a; }
 .legend .key.check { background: #d6352b; }
+.legend.simple .full, .legend:not(.simple) .easy { display: none; }
+.legend .key.trade { background: #2e9d57; }
 .legend .key.queen { background: #a24bd1; }
 .legend .key.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 8px); }
 

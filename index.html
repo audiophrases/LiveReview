@@ -35,13 +35,16 @@
       <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
       <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
       <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
-      <button id="tacticsToggle" title="Show captures, checks and attacks on the queen (T)">Tactics</button>
+      <button id="tacticsToggle" title="Show key tactics: hanging pieces, winning trades, mate (T)">Tactics</button>
       <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
     </div>
     <div id="legend" class="legend" hidden>
-      <span><i class="key capture"></i>Capture</span>
-      <span><i class="key check"></i>Check / mate</span>
-      <span><i class="key queen"></i>Attacks the queen</span>
+      <span class="full"><i class="key capture"></i>Capture</span>
+      <span class="easy"><i class="key capture"></i>Hanging piece</span>
+      <span class="easy"><i class="key trade"></i>Winning trade</span>
+      <span class="full"><i class="key check"></i>Check / mate</span>
+      <span class="easy"><i class="key check"></i>Mate in one</span>
+      <span class="full"><i class="key queen"></i>Attacks the queen</span>
       <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
     </div>
   </section>
@@ -72,7 +75,8 @@
       <label><input type="checkbox" data-opt="lines"> Engine lines</label>
       <label><input type="checkbox" data-opt="symbols"> Move symbols (!! ! ★ !? ?! ? ??)</label>
       <label><input type="checkbox" data-opt="worst"> Biggest-mistake preview</label>
-      <label><input type="checkbox" data-opt="tactics" data-noengine> Captures, checks and queen attacks</label>
+      <label><input type="checkbox" data-opt="tactics" data-noengine> Tactics on the board</label>
+      <label><input type="checkbox" data-opt="simple" data-noengine> …only key ones: hanging pieces, winning trades, mate</label>
       <label><input type="checkbox" data-opt="threats" data-noengine> …and the opponent's threats (dashed)</label>
       <label>Depth
         <select data-opt="depth">
