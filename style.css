@@ -374,6 +374,13 @@ a { color: var(--accent); }
 .legend .key.check { background: #d6352b; }
 .legend .key.queen { background: #a24bd1; }
 .legend .key.capture { background: #6f6f78; }
+.legend .key.fork { background: #e91e63; }
+.legend .key.pin { background: #00a3a3; }
+.legend .key.skewer { background: #3949ab; }
+.legend .key.discovered { background: #ef6c00; }
+.legend .key.removal { background: #6d4c41; }
+.legend .key.zwischen { background: #b8860b; }
+.legend .key.pressure { background: #546e7a; }
 .legend .key.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 8px); }
 
 .worst { font-size: 13px; }

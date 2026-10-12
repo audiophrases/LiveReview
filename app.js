@@ -62,6 +62,7 @@ const state = {
   opts: {
     bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
     tactics: false, tMate: true, tHanging: true, tTrade: true, tCheck: true, tQueen: true, tCapture: false,
+    tFork: true, tPin: true, tSkewer: true, tDiscovered: true, tPressure: true, tRemoval: true, tZwischen: true,
     threats: false, depth: 18, multipv: 3,
   },
 };
@@ -900,14 +901,28 @@ function playOnGrid(grid, m) {
 }
 
 // Tactics open to the side to move, flagged by kind so each can be shown or hidden on its own:
-//   mate     checkmate in one
-//   hanging  wins a piece (minor or bigger) that nothing defends
-//   trade    wins material by capturing a defended piece, once every recapture is played out
-//   check    gives check
-//   queen    makes a new attack on the enemy queen (discovered attacks included)
-//   capture  any other capture
-const TACTIC_RANK = { capture: 1, queen: 2, check: 3, trade: 4, hanging: 5, mate: 6 };
-const TACTIC_OPT = { mate: 'tMate', hanging: 'tHanging', trade: 'tTrade', check: 'tCheck', queen: 'tQueen', capture: 'tCapture' };
+//   mate        checkmate in one
+//   fork        the moved piece attacks two or more targets worth it, and can't simply be taken
+//   skewer      a bishop, rook or queen lines up through a big piece (or the king) to one behind it
+//   hanging     wins a piece (minor or bigger) that nothing defends
+//   removal     captures a piece that was guarding another, which can then be won
+//   discovered  moving a piece opens a line for a bishop, rook or queen onto a valuable target
+//   trade       wins material by capturing a defended piece, once every recapture is played out
+//   pin         a bishop, rook or queen pins a piece to a bigger one (or the king) behind it
+//   pressure    adds a second (or more) attacker on a piece, at least as many attackers as defenders
+//   check       gives check
+//   queen       makes a new attack on the enemy queen (discovered attacks included)
+//   capture     any other capture
+// The zwischenzug needs the engine and is worked out separately (see zwischenzug()).
+const TACTIC_RANK = {
+  capture: 1, queen: 2, check: 3, pressure: 4, pin: 5, trade: 6,
+  discovered: 7, removal: 8, hanging: 9, skewer: 10, fork: 11, mate: 12,
+};
+const TACTIC_OPT = {
+  mate: 'tMate', fork: 'tFork', skewer: 'tSkewer', hanging: 'tHanging', removal: 'tRemoval',
+  discovered: 'tDiscovered', trade: 'tTrade', pin: 'tPin', pressure: 'tPressure',
+  check: 'tCheck', queen: 'tQueen', capture: 'tCapture', zwischen: 'tZwischen',
+};
 const SEE_VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 100 };
 
 // Static exchange evaluation: what the mover nets by making the capture m on its square when both
@@ -936,7 +951,184 @@ function exchangeGain(grid, m) {
   return gain[0];
 }
 
-// Every tactical idea for the side to move: [{ from, to, kinds: [...], gain, cost }], whatever the settings.
+// ----- board geometry on fenGrid boards (grid[0] is rank 8) -----
+const DIAGONALS = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+const ORTHOGONALS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+const cellAt = (g, sq) => g[8 - +sq[1]][sq.charCodeAt(0) - 97];
+const sqName = (f, r) => FILES[f] + (r + 1);
+const onBoard = (f, r) => f >= 0 && f < 8 && r >= 0 && r < 8;
+const colorOf = (p) => (p === p.toUpperCase() ? 'w' : 'b');
+const typeOf = (p) => p.toLowerCase();
+
+// Directions a piece slides in, or null for pawns, knights and kings.
+function slideDirs(type) {
+  if (type === 'b') return DIAGONALS;
+  if (type === 'r') return ORTHOGONALS;
+  if (type === 'q') return [...DIAGONALS, ...ORTHOGONALS];
+  return null;
+}
+
+// Squares attacked by the piece on sq (sliders stop at, and include, the first piece in the way).
+function attacksFrom(g, sq) {
+  const p = cellAt(g, sq);
+  if (!p) return [];
+  const f0 = sq.charCodeAt(0) - 97;
+  const r0 = +sq[1] - 1;
+  const t = typeOf(p);
+  const out = [];
+  if (t === 'p') {
+    const dr = colorOf(p) === 'w' ? 1 : -1;
+    for (const df of [-1, 1]) if (onBoard(f0 + df, r0 + dr)) out.push(sqName(f0 + df, r0 + dr));
+  } else if (t === 'n' || t === 'k') {
+    for (const [df, dr] of t === 'n' ? KNIGHT_STEPS : KING_STEPS) if (onBoard(f0 + df, r0 + dr)) out.push(sqName(f0 + df, r0 + dr));
+  } else {
+    for (const [df, dr] of slideDirs(t)) {
+      for (let f = f0 + df, r = r0 + dr; onBoard(f, r); f += df, r += dr) {
+        out.push(sqName(f, r));
+        if (g[7 - r][f]) break;
+      }
+    }
+  }
+  return out;
+}
+
+// The occupied squares met walking from sq (exclusive) in one direction, nearest first.
+function piecesAlong(g, sq, df, dr, max = 2) {
+  const out = [];
+  for (let f = sq.charCodeAt(0) - 97 + df, r = +sq[1] - 1 + dr; onBoard(f, r) && out.length < max; f += df, r += dr) {
+    if (g[7 - r][f]) out.push(sqName(f, r));
+  }
+  return out;
+}
+
+// Exchange result for the piece on `from` capturing the piece on `to` (see exchangeGain).
+function captureGain(g, from, to) {
+  const p = cellAt(g, from);
+  const q = cellAt(g, to);
+  return exchangeGain(g, { from, to, piece: typeOf(p), captured: typeOf(q), color: colorOf(p), flags: 'c' });
+}
+
+// The most the opponent can win by capturing the piece on sq (0 or less: it is safe there).
+function pieceAtRisk(g, sq) {
+  const them = colorOf(cellAt(g, sq)) === 'w' ? 'b' : 'w';
+  let worst = -Infinity;
+  for (const a of attackersOf(g, sq, them)) worst = Math.max(worst, captureGain(g, a, sq));
+  return worst;
+}
+
+// The best `color` can do by capturing on sq: the exchange result of its best capture there.
+function bestCaptureOn(g, sq, color) {
+  let best = { gain: -Infinity, from: null };
+  for (const a of attackersOf(g, sq, color)) {
+    const gain = captureGain(g, a, sq);
+    if (gain > best.gain) best = { gain, from: a };
+  }
+  return best;
+}
+
+// Each detector returns what to draw with the move for that tactic, { lines: [{ from, to, dash, label }], label },
+// or null when the move isn't that tactic. `after` is the board once m is played.
+
+function detectFork(after, m, me) {
+  if (pieceAtRisk(after, m.to) > 0) return null;
+  const targets = [];
+  for (const sq of attacksFrom(after, m.to)) {
+    const p = cellAt(after, sq);
+    if (!p || colorOf(p) === me) continue;
+    if (typeOf(p) === 'k' || captureGain(after, m.to, sq) >= 2) targets.push(sq);
+  }
+  if (targets.length < 2) return null;
+  return { lines: targets.map((sq) => ({ from: m.to, to: sq })), label: 'Fork' };
+}
+
+// Pins and skewers made by the moved bishop, rook or queen: { pin, skewer }.
+function detectLine(after, m, me) {
+  const mover = cellAt(after, m.to);
+  const dirs = slideDirs(typeOf(mover));
+  if (!dirs || pieceAtRisk(after, m.to) > 0) return {};
+  const them = me === 'w' ? 'b' : 'w';
+  const vMover = SEE_VALUE[typeOf(mover)];
+  const fx = m.from.charCodeAt(0) - m.to.charCodeAt(0);
+  const fy = +m.from[1] - +m.to[1];
+  const found = {};
+  for (const [df, dr] of dirs) {
+    if (fx * dr - fy * df === 0) continue;  // moved along this line: the pin or skewer was already there
+    const [a, b] = piecesAlong(after, m.to, df, dr);
+    if (!a || !b) continue;
+    const A = cellAt(after, a);
+    const B = cellAt(after, b);
+    if (colorOf(A) === me || colorOf(B) === me) continue;
+    const vA = SEE_VALUE[typeOf(A)];
+    const vB = SEE_VALUE[typeOf(B)];
+    const winnable = (sq, v) => v > vMover || !attackersOf(after, sq, them).length;
+    if (vA < vB && vA >= 3 && (typeOf(B) === 'k' || winnable(b, vB))) {
+      found.pin ||= { lines: [{ from: m.to, to: b }], label: typeOf(B) === 'k' ? 'Pin+' : 'Pin' };
+    } else if (vA > vB && vB >= 3 && (typeOf(A) === 'k' || winnable(a, vA)) && winnable(b, vB)) {
+      found.skewer ||= { lines: [{ from: m.to, to: b }], label: 'Skewer' };
+    }
+  }
+  return found;
+}
+
+// A bishop, rook or queen behind the moved piece now hits something worth it.
+function detectDiscovered(after, m, me) {
+  if (m.flags.includes('k') || m.flags.includes('q')) return null;
+  for (const [df, dr] of [...DIAGONALS, ...ORTHOGONALS]) {
+    const [behind] = piecesAlong(after, m.from, -df, -dr, 1);
+    if (!behind) continue;
+    const S = cellAt(after, behind);
+    if (colorOf(S) !== me || !slideDirs(typeOf(S))?.some(([x, y]) => x === df && y === dr)) continue;
+    const [target] = piecesAlong(after, m.from, df, dr, 1);
+    if (!target || target === m.to) continue;
+    const T = cellAt(after, target);
+    if (colorOf(T) === me) continue;
+    const check = typeOf(T) === 'k';
+    if (check || captureGain(after, behind, target) >= 2) {
+      return { lines: [{ from: behind, to: target }], label: check ? 'Disc+' : 'Disc' };
+    }
+  }
+  return null;
+}
+
+// The move adds an attacker on a piece now attacked at least twice and no less than it is defended.
+function detectPressure(grid, after, m, me) {
+  const them = me === 'w' ? 'b' : 'w';
+  let best = null;
+  for (const sq of attacksFrom(after, m.to)) {
+    const p = cellAt(after, sq);
+    if (!p || colorOf(p) === me || typeOf(p) === 'k' || SEE_VALUE[typeOf(p)] < 3) continue;
+    const attackers = attackersOf(after, sq, me);
+    const defenders = attackersOf(after, sq, them);
+    if (attackers.length < 2 || attackers.length < defenders.length) continue;
+    if (attackersOf(grid, sq, me).filter((x) => x !== m.from).length >= attackers.length) continue;
+    if (best && SEE_VALUE[typeOf(p)] <= best.value) continue;
+    best = {
+      value: SEE_VALUE[typeOf(p)],
+      target: sq,
+      lines: [
+        ...attackers.map((a) => ({ from: a, to: sq, label: a === m.to ? `${attackers.length}v${defenders.length}` : null })),
+        ...defenders.map((d) => ({ from: d, to: sq, dash: true })),
+      ],
+    };
+  }
+  return best && { lines: best.lines, label: null, target: best.target };
+}
+
+// Capturing a piece that guarded another, which can then be won.
+function detectRemoval(grid, after, m, me) {
+  if (!m.captured || m.flags.includes('e') || exchangeGain(grid, m) < 0) return null;
+  for (const sq of attacksFrom(grid, m.to)) {
+    const T = cellAt(grid, sq);
+    if (!T || colorOf(T) === me || typeOf(T) === 'k' || SEE_VALUE[typeOf(T)] < 3) continue;
+    if (bestCaptureOn(grid, sq, me).gain >= 2) continue;  // already winnable: nothing needed removing
+    const next = bestCaptureOn(after, sq, me);
+    if (next.gain >= 2) return { lines: [{ from: next.from, to: sq, dash: true }], label: 'Removal' };
+  }
+  return null;
+}
+
+// Every tactical idea for the side to move: [{ from, to, kinds: [...], extra: { kind: {...} }, gain, cost }],
+// whatever the settings.
 const tacticsCache = new Map();
 function tacticMoves(fen) {
   if (tacticsCache.has(fen)) return tacticsCache.get(fen);
@@ -966,18 +1158,32 @@ function tacticMoves(fen) {
           }
         }
       }
+      const after = playOnGrid(grid, m);
       if (queens.length && m.captured !== 'q') {
-        const after = playOnGrid(grid, m);
         if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) kinds.push('queen');
       }
+      const extra = {};
+      const note = (kind, info) => {
+        if (!info) return;
+        kinds.push(kind);
+        extra[kind] = info;
+      };
+      note('fork', detectFork(after, m, me));
+      const line = detectLine(after, m, me);
+      note('pin', line.pin);
+      note('skewer', line.skewer);
+      note('discovered', detectDiscovered(after, m, me));
+      note('pressure', detectPressure(grid, after, m, me));
+      note('removal', detectRemoval(grid, after, m, me));
       if (!kinds.length) continue;
       const key = m.from + m.to;
       const old = found.get(key);
       if (old) {
         for (const k of kinds) if (!old.kinds.includes(k)) old.kinds.push(k);
+        for (const k in extra) old.extra[k] ||= extra[k];
         old.gain = Math.max(old.gain, gain);
       } else {
-        found.set(key, { from: m.from, to: m.to, kinds, gain, cost: SEE_VALUE[m.piece] });
+        found.set(key, { from: m.from, to: m.to, kinds, extra, gain, cost: SEE_VALUE[m.piece] });
       }
     }
     // Of several pieces that can win the same target, only the best one (most gain, then cheapest) is marked.
@@ -992,6 +1198,20 @@ function tacticMoves(fen) {
         } else {
           t.kinds.splice(t.kinds.indexOf(kind), 1);
         }
+      }
+    }
+    // Likewise one "attackers vs defenders" move per pressured piece: the cheapest piece doing it.
+    const byPressured = new Map();
+    for (const t of found.values()) {
+      if (!t.kinds.includes('pressure')) continue;
+      const target = t.extra.pressure.target;
+      const best = byPressured.get(target);
+      const drop = (x) => x.kinds.splice(x.kinds.indexOf('pressure'), 1);
+      if (!best || t.cost < best.cost) {
+        if (best) drop(best);
+        byPressured.set(target, t);
+      } else {
+        drop(t);
       }
     }
   }
@@ -1009,9 +1229,29 @@ function tactics(fen) {
     for (const k of t.kinds) {
       if (state.opts[TACTIC_OPT[k]] && (!kind || TACTIC_RANK[k] > TACTIC_RANK[kind])) kind = k;
     }
-    if (kind) out.push({ from: t.from, to: t.to, kind });
+    if (kind) out.push({ from: t.from, to: t.to, kind, extra: t.extra[kind] || null });
   }
   return out;
+}
+
+// Zwischenzug: our piece was just captured and we can take back, but the engine's best move is
+// something else first, with the recapture coming on our following move.
+// { from, to, later } (later: the delayed recapture, as UCI), or null.
+function zwischenzug(idx) {
+  const plies = state.game?.plies;
+  const ply = plies?.[idx];
+  const prev = plies?.[idx - 1];
+  if (!ply?.lm || !prev) return null;
+  const sq = castleFix(prev.fen, ply.lm).slice(2, 4);
+  const victim = cellAt(fenGrid(prev.fen), sq);
+  const me = ply.fen.split(' ')[1];
+  if (!victim || colorOf(victim) !== me) return null;
+  const best = evals.get(ply.fen)?.lines[0];
+  if (!best || best.depth < 10 || best.pv.length < 3) return null;
+  const [first, , later] = best.pv;
+  if (first.slice(2, 4) === sq || later.slice(2, 4) !== sq) return null;
+  if (!chess.load(ply.fen) || !chess.moves({ verbose: true }).some((m) => m.to === sq)) return null;
+  return { from: first.slice(0, 2), to: first.slice(2, 4), later };
 }
 
 function fmtEval(line) {
@@ -1330,7 +1570,11 @@ function tallyHtml() {
 }
 
 const BEST_COLOR = '#2f7fd8';
-const TACTIC_COLOR = { mate: '#8e1b1b', hanging: '#e58f2a', trade: '#2e9d57', check: '#d6352b', queen: '#a24bd1', capture: '#6f6f78' };
+const TACTIC_COLOR = {
+  mate: '#8e1b1b', fork: '#e91e63', skewer: '#3949ab', hanging: '#e58f2a', removal: '#6d4c41',
+  discovered: '#ef6c00', trade: '#2e9d57', pin: '#00a3a3', pressure: '#546e7a',
+  check: '#d6352b', queen: '#a24bd1', capture: '#6f6f78', zwischen: '#b8860b',
+};
 
 // Tactics underneath (the opponent's threats lowest), engine arrows on top, labels over everything.
 function drawArrows(ply, engineArrows) {
@@ -1346,12 +1590,27 @@ function drawArrows(ply, engineArrows) {
   if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
     const add = (fen, dash) => {
       for (const t of tactics(fen)) {
-        list.push({ from: t.from, to: t.to, color: TACTIC_COLOR[t.kind], width: t.kind === 'mate' ? 0.14 : 0.1, opacity: dash ? 0.55 : 0.85, dash });
+        const color = TACTIC_COLOR[t.kind];
+        const opacity = dash ? 0.55 : 0.85;
+        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash, label: t.extra?.label });
+        // The idea behind the move: fork targets, the pinned line, the unmasked attacker, the defenders...
+        for (const x of t.extra?.lines || []) {
+          if (x.from === x.to) continue;
+          list.push({ from: x.from, to: x.to, color, width: 0.055, opacity: opacity * 0.85, dash: dash || x.dash, label: x.label });
+        }
       }
     };
     // Passing the turn is meaningless while the side to move is in check.
     if (state.opts.threats && !findCheckedKing(ply.fen)) add(passTurn(ply.fen), true);
     add(ply.fen, false);
+    if (state.opts.tZwischen && state.analysis) {
+      const z = zwischenzug(currentIndex());
+      if (z) {
+        const color = TACTIC_COLOR.zwischen;
+        list.push({ from: z.from, to: z.to, color, width: 0.11, opacity: 0.9, label: 'Zw' });
+        list.push({ from: z.later.slice(0, 2), to: z.later.slice(2, 4), color, width: 0.055, opacity: 0.75, dash: true });
+      }
+    }
   }
   for (const a of engineArrows) list.push({ ...a, from: a.uci.slice(0, 2), to: a.uci.slice(2, 4) });
   const labels = [];
