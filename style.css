@@ -365,11 +365,13 @@ a { color: var(--accent); }
 .legend[hidden] { display: none; }
 .legend:not(.threats) .opp { display: none; }
 .legend .key { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
-.legend .key.capture { background: #e58f2a; }
-.legend .key.check { background: #d6352b; }
-.legend.simple .full, .legend:not(.simple) .easy { display: none; }
+.legend [hidden] { display: none; }
+.legend .key.mate { background: #8e1b1b; height: 4px; }
+.legend .key.hanging { background: #e58f2a; }
 .legend .key.trade { background: #2e9d57; }
+.legend .key.check { background: #d6352b; }
 .legend .key.queen { background: #a24bd1; }
+.legend .key.capture { background: #6f6f78; }
 .legend .key.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 8px); }
 
 .worst { font-size: 13px; }
@@ -404,3 +406,7 @@ a { color: var(--accent); }
   .thumb { width: 88px; }
 }
 .worst-card.cur::after { content: "on the board"; align-self: flex-start; margin-left: auto; font-size: 11px; color: var(--accent); white-space: nowrap; }
+
+.settings .hint { color: var(--muted); font-size: 11px; margin-left: auto; }
+.subopts { margin: 0 0 4px 22px; padding-left: 10px; border-left: 2px solid var(--line); }
+.subopts.off { opacity: 0.55; }

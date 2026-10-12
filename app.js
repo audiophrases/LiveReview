@@ -39,7 +39,7 @@ const el = {
   live: $('live'), flip: $('flip'), sound: $('sound'),
   userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
-  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), legend: $('legend'), worst: $('worst'), tally: $('tally'),
+  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'), legend: $('legend'), worst: $('worst'), tally: $('tally'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
   evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
@@ -60,7 +60,8 @@ const state = {
   analysis: true,
   opts: {
     bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
-    tactics: false, simple: true, threats: false, depth: 18, multipv: 3,
+    tactics: false, tMate: true, tHanging: true, tTrade: true, tCheck: true, tQueen: true, tCapture: false,
+    threats: false, depth: 18, multipv: 3,
   },
 };
 try {
@@ -896,78 +897,119 @@ function playOnGrid(grid, m) {
   return g;
 }
 
-// Captures, checks and fresh attacks on the queen open to the side to move:
-// [{ from, to, kind }], kind being 'mate', 'check', 'queen' or 'capture'.
-const TACTIC_RANK = { capture: 1, queen: 2, check: 3, mate: 4 };
+// Tactics open to the side to move, flagged by kind so each can be shown or hidden on its own:
+//   mate     checkmate in one
+//   hanging  wins a piece (minor or bigger) that nothing defends
+//   trade    wins material by capturing a defended piece, once every recapture is played out
+//   check    gives check
+//   queen    makes a new attack on the enemy queen (discovered attacks included)
+//   capture  any other capture
+const TACTIC_RANK = { capture: 1, queen: 2, check: 3, trade: 4, hanging: 5, mate: 6 };
+const TACTIC_OPT = { mate: 'tMate', hanging: 'tHanging', trade: 'tTrade', check: 'tCheck', queen: 'tQueen', capture: 'tCapture' };
+const SEE_VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 100 };
+
+// Static exchange evaluation: what the mover nets by making the capture m on its square when both
+// sides keep recapturing there with their cheapest piece (stopping whenever that is better).
+// Hidden attackers that line up behind a piece that has just taken come into play (x-rays).
+function exchangeGain(grid, m) {
+  const g = playOnGrid(grid, m);
+  const gain = [SEE_VALUE[m.captured]];
+  let onTarget = SEE_VALUE[m.promotion || m.piece];
+  let side = m.color === 'w' ? 'b' : 'w';
+  for (let d = 1; d < 32; d++) {
+    const attackers = attackersOf(g, m.to, side);
+    if (!attackers.length) break;
+    let from = attackers[0];
+    let cost = Infinity;
+    for (const sq of attackers) {
+      const v = SEE_VALUE[g[8 - +sq[1]][sq.charCodeAt(0) - 97].toLowerCase()];
+      if (v < cost) { cost = v; from = sq; }
+    }
+    gain.push(onTarget - gain[d - 1]);
+    onTarget = cost;
+    g[8 - +from[1]][from.charCodeAt(0) - 97] = null;
+    side = side === 'w' ? 'b' : 'w';
+  }
+  for (let d = gain.length - 1; d > 0; d--) gain[d - 1] = -Math.max(-gain[d - 1], gain[d]);
+  return gain[0];
+}
+
+// Every tactical idea for the side to move: [{ from, to, kinds: [...], gain, cost }], whatever the settings.
 const tacticsCache = new Map();
-function tactics(fen) {
+function tacticMoves(fen) {
   if (tacticsCache.has(fen)) return tacticsCache.get(fen);
   const found = new Map();  // keyed by from+to, so the four promotions count once
   if (chess.load(fen)) {
     const me = chess.turn();
+    const them = me === 'w' ? 'b' : 'w';
     const grid = fenGrid(fen);
-    const queens = findPieces('q', me === 'w' ? 'b' : 'w');
+    const queens = findPieces('q', them);
     // Pieces already hitting the queen don't count as new attacks.
     const before = new Set(queens.flatMap((q) => attackersOf(grid, q, me)));
     for (const m of chess.moves({ verbose: true })) {
-      let kind = m.san.endsWith('#') ? 'mate' : m.san.endsWith('+') ? 'check' : null;
-      if (!kind && queens.length && m.captured !== 'q') {
-        // What hits the queen once the move is made, discovered attacks included.
-        const after = playOnGrid(grid, m);
-        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) kind = 'queen';
+      const kinds = [];
+      let gain = 0;
+      if (m.san.endsWith('#')) kinds.push('mate');
+      else if (m.san.endsWith('+')) kinds.push('check');
+      if (m.captured) {
+        kinds.push('capture');
+        if (!m.flags.includes('e')) {
+          const defended = attackersOf(playOnGrid(grid, m), m.to, them).length > 0;
+          if (!defended && SEE_VALUE[m.captured] >= 3) {
+            kinds.push('hanging');
+            gain = SEE_VALUE[m.captured];
+          } else if (defended) {
+            gain = exchangeGain(grid, m);
+            if (gain >= 1) kinds.push('trade');
+          }
+        }
       }
-      if (!kind && m.captured) kind = 'capture';
+      if (queens.length && m.captured !== 'q') {
+        const after = playOnGrid(grid, m);
+        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) kinds.push('queen');
+      }
+      if (!kinds.length) continue;
       const key = m.from + m.to;
-      if (kind && !(TACTIC_RANK[found.get(key)?.kind] >= TACTIC_RANK[kind])) {
-        found.set(key, { from: m.from, to: m.to, kind });
+      const old = found.get(key);
+      if (old) {
+        for (const k of kinds) if (!old.kinds.includes(k)) old.kinds.push(k);
+        old.gain = Math.max(old.gain, gain);
+      } else {
+        found.set(key, { from: m.from, to: m.to, kinds, gain, cost: SEE_VALUE[m.piece] });
+      }
+    }
+    // Of several pieces that can win the same target, only the best one (most gain, then cheapest) is marked.
+    for (const kind of ['hanging', 'trade']) {
+      const byTarget = new Map();
+      for (const t of found.values()) {
+        if (!t.kinds.includes(kind)) continue;
+        const best = byTarget.get(t.to);
+        if (!best || t.gain > best.gain || (t.gain === best.gain && t.cost < best.cost)) {
+          if (best) best.kinds.splice(best.kinds.indexOf(kind), 1);
+          byTarget.set(t.to, t);
+        } else {
+          t.kinds.splice(t.kinds.indexOf(kind), 1);
+        }
       }
     }
   }
-  const result = [...found.values()];
+  const result = [...found.values()].filter((t) => t.kinds.length);
   if (tacticsCache.size > 2000) tacticsCache.clear();
   tacticsCache.set(fen, result);
   return result;
 }
 
-// The few tactics worth a glance, chess.com style: mate in one, pieces left hanging
-// and captures that win material even though the target is defended.
-// [{ from, to, kind }], kind being 'mate', 'hanging' or 'trade'; best first, at most SIMPLE_MAX.
-const SIMPLE_MAX = 3;
-const SIMPLE_RANK = { trade: 1, hanging: 2, mate: 3 };
-const simpleCache = new Map();
-function simpleTactics(fen) {
-  if (simpleCache.has(fen)) return simpleCache.get(fen);
-  const found = [];
-  if (chess.load(fen)) {
-    const me = chess.turn();
-    const grid = fenGrid(fen);
-    for (const m of chess.moves({ verbose: true })) {
-      let kind = m.san.endsWith('#') ? 'mate' : null;
-      let gain = 100;
-      if (!kind && m.captured && !m.flags.includes('e')) {
-        const target = VALUE[m.captured];
-        const attacker = VALUE[m.piece];
-        if (target >= 3) {
-          if (!attackersOf(grid, m.to, me === 'w' ? 'b' : 'w').length) { kind = 'hanging'; gain = target; }
-          else if (target - attacker >= 2) { kind = 'trade'; gain = target - attacker; }
-        }
-      }
-      if (!kind) continue;
-      // Of several pieces that can take the same target, the cheapest one makes the arrow.
-      const old = found.find((f) => f.to === m.to && f.kind === kind);
-      const cost = VALUE[m.piece];
-      if (old) {
-        if (cost < old.cost) Object.assign(old, { from: m.from, cost });
-      } else if (!found.some((f) => f.from === m.from && f.to === m.to)) {
-        found.push({ from: m.from, to: m.to, kind, gain, cost });
-      }
+// What to draw: the kinds switched on in settings, one arrow per move showing its most important kind.
+function tactics(fen) {
+  const out = [];
+  for (const t of tacticMoves(fen)) {
+    let kind = null;
+    for (const k of t.kinds) {
+      if (state.opts[TACTIC_OPT[k]] && (!kind || TACTIC_RANK[k] > TACTIC_RANK[kind])) kind = k;
     }
+    if (kind) out.push({ from: t.from, to: t.to, kind });
   }
-  found.sort((a, b) => SIMPLE_RANK[b.kind] - SIMPLE_RANK[a.kind] || b.gain - a.gain);
-  const result = found.slice(0, SIMPLE_MAX).map(({ from, to, kind }) => ({ from, to, kind }));
-  if (simpleCache.size > 2000) simpleCache.clear();
-  simpleCache.set(fen, result);
-  return result;
+  return out;
 }
 
 function fmtEval(line) {
@@ -1078,7 +1120,8 @@ function renderControls() {
   el.tacticsToggle.classList.toggle('on', state.opts.tactics);
   el.legend.hidden = !state.opts.tactics;
   el.legend.classList.toggle('threats', state.opts.threats);
-  el.legend.classList.toggle('simple', state.opts.simple);
+  for (const item of el.legend.querySelectorAll('[data-kind]')) item.hidden = !state.opts[TACTIC_OPT[item.dataset.kind]];
+  el.subopts.classList.toggle('off', !state.opts.tactics);
   for (const input of el.settings.querySelectorAll('[data-opt]')) {
     const v = state.opts[input.dataset.opt];
     if (input.type === 'checkbox') input.checked = !!v;
@@ -1285,7 +1328,7 @@ function tallyHtml() {
 }
 
 const BEST_COLOR = '#2f7fd8';
-const TACTIC_COLOR = { hanging: '#e58f2a', trade: '#2e9d57', capture: '#e58f2a', queen: '#a24bd1', check: '#d6352b', mate: '#d6352b' };
+const TACTIC_COLOR = { mate: '#8e1b1b', hanging: '#e58f2a', trade: '#2e9d57', check: '#d6352b', queen: '#a24bd1', capture: '#6f6f78' };
 
 // Tactics underneath (the opponent's threats lowest), engine arrows on top, labels over everything.
 function drawArrows(ply, engineArrows) {
@@ -1300,7 +1343,7 @@ function drawArrows(ply, engineArrows) {
   const variant = state.game?.info?.variant?.key || 'standard';
   if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
     const add = (fen, dash) => {
-      for (const t of (state.opts.simple ? simpleTactics(fen) : tactics(fen))) {
+      for (const t of tactics(fen)) {
         list.push({ from: t.from, to: t.to, color: TACTIC_COLOR[t.kind], width: t.kind === 'mate' ? 0.14 : 0.1, opacity: dash ? 0.55 : 0.85, dash });
       }
     };
