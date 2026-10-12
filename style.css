@@ -27,8 +27,10 @@
 }
 
 * { box-sizing: border-box; }
+html { scrollbar-gutter: stable; }
 body {
   margin: 0;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
   font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -410,3 +412,34 @@ a { color: var(--accent); }
 .settings .hint { color: var(--muted); font-size: 11px; margin-left: auto; }
 .subopts { margin: 0 0 4px 22px; padding-left: 10px; border-left: 2px solid var(--line); }
 .subopts.off { opacity: 0.55; }
+
+/* ---------- movable, resizable board ----------
+   The board, its eval bar, the player bars and every arrow and badge are one box. It is moved and
+   scaled with a transform, which never changes the page layout, so the panels around it stay put. */
+.boardunit {
+  position: relative;
+  transform-origin: 0 0;
+  transform: translate(var(--bx, 0px), var(--by, 0px)) scale(var(--bk, 1));
+  --bk: 1;
+}
+.boardunit.moved { z-index: 20; }
+.boardunit .bar { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.boardunit.dragging .bar { cursor: grabbing; }
+.boardunit.dragging, .boardunit.resizing { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.boardresize {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: calc(22px / var(--bk));
+  height: calc(22px / var(--bk));
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background:
+    linear-gradient(135deg, transparent 0 50%, var(--accent) 50% 58%, transparent 58% 70%, var(--accent) 70% 78%, transparent 78%);
+  border-bottom-right-radius: 4px;
+}
+.boardunit:hover .boardresize, .boardunit.resizing .boardresize { opacity: 0.85; }
+@media (hover: none) { .boardresize { opacity: 0.6; } }
+.settings .reset { margin-top: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; }

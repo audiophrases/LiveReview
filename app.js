@@ -15,6 +15,7 @@ const TV_CHECK_MS = 10000;
 const RATE_LIMIT_WAIT_MS = 60000;
 const LAST_USER_KEY = 'livewatch.user';
 const ENGINE_KEY = 'livewatch.engine';
+const SOUND_KEY = 'livewatch.sound';
 const OPTS_KEY = 'livewatch.opts';
 const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
 const SWEEP_LINES = 2;
@@ -66,6 +67,7 @@ const state = {
 };
 try {
   state.analysis = localStorage.getItem(ENGINE_KEY) !== 'off';
+  state.sound = localStorage.getItem(SOUND_KEY) !== 'off';
   Object.assign(state.opts, JSON.parse(localStorage.getItem(OPTS_KEY) || '{}'));
 } catch { /* optional */ }
 
@@ -1616,6 +1618,106 @@ function go(idx, dir = -1) {
   scheduleRender();
 }
 
+// ---------- movable, resizable board ----------
+// Drag either player bar to move the board, drag the corner handle to resize it. The whole unit
+// (board, eval bar, clocks, arrows, badges) is moved and scaled by a CSS transform, so nothing
+// around it reflows. Position and size are remembered.
+
+const BOARD_KEY = 'livewatch.board';
+const BOARD_MIN_K = 0.4;
+const BOARD_MAX_K = 2.5;
+const boardBox = { x: 0, y: 0, k: 1 };
+const boardUnit = $('boardunit');
+
+function applyBoardBox() {
+  boardUnit.style.setProperty('--bx', `${boardBox.x}px`);
+  boardUnit.style.setProperty('--by', `${boardBox.y}px`);
+  boardUnit.style.setProperty('--bk', String(boardBox.k));
+  boardUnit.classList.toggle('moved', boardBox.x !== 0 || boardBox.y !== 0 || boardBox.k !== 1);
+}
+
+function saveBoardBox() {
+  try { localStorage.setItem(BOARD_KEY, JSON.stringify(boardBox)); } catch { /* optional */ }
+}
+
+// Keep a good part of the board on screen so it can always be grabbed again.
+function keepBoardReachable() {
+  const r = boardUnit.getBoundingClientRect();
+  const grab = Math.min(120, r.width / 2);
+  if (r.right < grab) boardBox.x += grab - r.right;
+  if (r.left > innerWidth - grab) boardBox.x -= r.left - (innerWidth - grab);
+  if (r.top + scrollY < 0) boardBox.y -= r.top + scrollY;
+}
+
+function resetBoardBox() {
+  Object.assign(boardBox, { x: 0, y: 0, k: 1 });
+  applyBoardBox();
+  saveBoardBox();
+}
+
+function initBoardUnit() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(BOARD_KEY) || 'null');
+    if (saved && [saved.x, saved.y, saved.k].every(Number.isFinite)) {
+      Object.assign(boardBox, { x: saved.x, y: saved.y, k: Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, saved.k)) });
+    }
+  } catch { /* optional */ }
+  applyBoardBox();
+  keepBoardReachable();
+  applyBoardBox();
+
+  let drag = null;
+  let lastPress = { t: 0, x: 0, y: 0 };
+  boardUnit.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const resize = e.target.closest('.boardresize');
+    if (!resize && !e.target.closest('.bar')) return;
+    e.preventDefault();
+    // Two quick presses in the same spot reset the board (pointer capture hides the browser's dblclick).
+    if (e.timeStamp - lastPress.t < 400 && Math.hypot(e.clientX - lastPress.x, e.clientY - lastPress.y) < 8) {
+      lastPress.t = 0;
+      resetBoardBox();
+      return;
+    }
+    lastPress = { t: e.timeStamp, x: e.clientX, y: e.clientY };
+    boardUnit.setPointerCapture(e.pointerId);
+    drag = {
+      mode: resize ? 'resize' : 'move', id: e.pointerId, sx: e.clientX, sy: e.clientY,
+      x: boardBox.x, y: boardBox.y, k: boardBox.k, w: boardUnit.offsetWidth,
+    };
+    boardUnit.classList.add(resize ? 'resizing' : 'dragging');
+  });
+  boardUnit.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.sx;
+    const dy = e.clientY - drag.sy;
+    if (drag.mode === 'move') {
+      boardBox.x = drag.x + dx;
+      boardBox.y = drag.y + dy;
+    } else {
+      // The top-left corner stays put; the new width follows the pointer along the diagonal.
+      const width = Math.max(1, drag.k * drag.w + (dx + dy) / 2);
+      boardBox.k = Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, width / drag.w));
+    }
+    applyBoardBox();
+  });
+  const end = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag = null;
+    boardUnit.classList.remove('dragging', 'resizing');
+    keepBoardReachable();
+    applyBoardBox();
+    saveBoardBox();
+  };
+  boardUnit.addEventListener('pointerup', end);
+  boardUnit.addEventListener('pointercancel', end);
+  $('boardReset').onclick = resetBoardBox;
+  addEventListener('resize', () => {
+    keepBoardReachable();
+    applyBoardBox();
+  });
+}
+
 // ---------- wiring ----------
 
 el.userForm.addEventListener('submit', (e) => {
@@ -1636,6 +1738,7 @@ el.live.onclick = () => { state.view = null; scheduleRender(); };
 el.flip.onclick = () => { state.flipped = !state.flipped; scheduleRender(); };
 el.sound.onclick = () => {
   state.sound = !state.sound;
+  try { localStorage.setItem(SOUND_KEY, state.sound ? 'on' : 'off'); } catch { /* optional */ }
   el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 };
 el.engineToggle.onclick = () => {
@@ -1692,7 +1795,9 @@ setInterval(() => {
   }
 }, 100);
 
+el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 initSections();
+initBoardUnit();
 buildBoard();
 render();
 

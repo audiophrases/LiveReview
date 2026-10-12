@@ -19,12 +19,15 @@
 
 <main class="layout">
   <section class="stage">
-    <div class="bar" id="barTop"></div>
-    <div class="boardwrap">
-      <div class="evalbar" id="evalbar" aria-label="Engine evaluation"><div class="fill" id="evalfill"></div><span id="evaltext"></span></div>
-      <div class="board" id="board"></div>
+    <div class="boardunit" id="boardunit">
+      <div class="bar" id="barTop" title="Drag to move the board (double-click to reset)"></div>
+      <div class="boardwrap">
+        <div class="evalbar" id="evalbar" aria-label="Engine evaluation"><div class="fill" id="evalfill"></div><span id="evaltext"></span></div>
+        <div class="board" id="board"></div>
+      </div>
+      <div class="bar" id="barBottom" title="Drag to move the board (double-click to reset)"></div>
+      <div class="boardresize" id="boardResize" title="Drag to resize the board (double-click to reset)"></div>
     </div>
-    <div class="bar" id="barBottom"></div>
     <div class="controls">
       <button id="first" title="First move (Home)">⏮</button>
       <button id="prev" title="Previous move (←)">◀</button>
@@ -97,6 +100,7 @@
           <option value="4">4</option><option value="5">5</option>
         </select>
       </label>
+      <button id="boardReset" class="reset" type="button">Reset board position and size</button>
       </div>
     </details>
   </aside>
