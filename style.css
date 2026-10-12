@@ -145,6 +145,7 @@ a { color: var(--accent); }
 .meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; overflow-wrap: anywhere; }
 .movestitle { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .movespanel { display: flex; flex-direction: column; }
+.analysis { display: flex; flex-direction: column; }
 .moves {
   list-style: none;
   margin: 0;
@@ -225,7 +226,6 @@ a { color: var(--accent); }
     top: 16px;
     max-height: calc(100vh - 100px);
   }
-  .analysis { overflow-y: auto; }
   .movespanel { height: calc(100vh - 100px); }
   .moves { max-height: none; }
   .moves button { padding: 4px 8px; }
@@ -443,3 +443,61 @@ a { color: var(--accent); }
 .boardunit:hover .boardresize, .boardunit.resizing .boardresize { opacity: 0.85; }
 @media (hover: none) { .boardresize { opacity: 0.6; } }
 .settings .reset { margin-top: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; }
+
+/* ---------- movable, resizable panels ----------
+   Panels move with the `translate` property (no reflow) and resize by width and height. A small
+   grip on the top edge moves a panel, a corner handle resizes it; both show on hover. */
+.pscroll { flex: 1; min-height: 0; overflow-y: auto; }
+.panel { position: relative; }
+@media (min-width: 1250px) {
+  .analysis.panel, .movespanel.panel { position: sticky; }
+}
+.panel { translate: var(--px, 0px) var(--py, 0px); }
+.panel.sized { max-height: none; }
+.panel.sized .moves { max-height: none; }
+.controlpanel { padding-top: 2px; }
+.panelgrip {
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  width: 44px;
+  height: 12px;
+  margin-left: -22px;
+  border-radius: 999px;
+  background: var(--line);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 2;
+}
+.panelgrip::after {
+  content: "";
+  position: absolute;
+  inset: 4px 9px;
+  background: repeating-linear-gradient(90deg, var(--muted) 0 3px, transparent 3px 6px);
+  border-radius: 2px;
+  opacity: 0.8;
+}
+.panelresize {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 2;
+  background: linear-gradient(135deg, transparent 0 50%, var(--accent) 50% 58%, transparent 58% 70%, var(--accent) 70% 78%, transparent 78%);
+  border-bottom-right-radius: 6px;
+}
+.controlpanel[data-size="width"] .panelresize { cursor: ew-resize; }
+.panel:hover > .panelgrip, .panel:hover > .panelresize,
+.panel.dragging > .panelgrip, .panel.resizing > .panelresize { opacity: 0.9; }
+@media (hover: none) { .panelgrip, .panelresize { opacity: 0.6; } }
+.panel.dragging, .panel.resizing { outline: 2px dashed var(--accent); outline-offset: 3px; }
+.panel.dragging > .panelgrip { cursor: grabbing; }
+
+body.moving, body.moving * { user-select: none !important; -webkit-user-select: none !important; cursor: grabbing; }

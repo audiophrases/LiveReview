@@ -1623,6 +1623,10 @@ function go(idx, dir = -1) {
 // (board, eval bar, clocks, arrows, badges) is moved and scaled by a CSS transform, so nothing
 // around it reflows. Position and size are remembered.
 
+// The board and the panels can overlap; whichever was touched last comes to the front.
+let zTop = 30;
+const bringToFront = (node) => { node.style.zIndex = String(++zTop); };
+
 const BOARD_KEY = 'livewatch.board';
 const BOARD_MIN_K = 0.4;
 const BOARD_MAX_K = 2.5;
@@ -1670,6 +1674,7 @@ function initBoardUnit() {
   let lastPress = { t: 0, x: 0, y: 0 };
   boardUnit.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
+    if (boardUnit.classList.contains('moved')) bringToFront(boardUnit);
     const resize = e.target.closest('.boardresize');
     if (!resize && !e.target.closest('.bar')) return;
     e.preventDefault();
@@ -1686,6 +1691,7 @@ function initBoardUnit() {
       x: boardBox.x, y: boardBox.y, k: boardBox.k, w: boardUnit.offsetWidth,
     };
     boardUnit.classList.add(resize ? 'resizing' : 'dragging');
+    document.body.classList.add('moving');
   });
   boardUnit.addEventListener('pointermove', (e) => {
     if (!drag || e.pointerId !== drag.id) return;
@@ -1705,16 +1711,156 @@ function initBoardUnit() {
     if (!drag || e.pointerId !== drag.id) return;
     drag = null;
     boardUnit.classList.remove('dragging', 'resizing');
+    document.body.classList.remove('moving');
     keepBoardReachable();
     applyBoardBox();
     saveBoardBox();
   };
   boardUnit.addEventListener('pointerup', end);
   boardUnit.addEventListener('pointercancel', end);
-  $('boardReset').onclick = resetBoardBox;
+  $('boardReset').onclick = () => { resetBoardBox(); resetPanels(); };
   addEventListener('resize', () => {
     keepBoardReachable();
     applyBoardBox();
+  });
+}
+
+// ---------- movable, resizable panels ----------
+// The analysis panel, the moves list and the control buttons each get a grip on their top edge
+// (drag to move) and a corner handle (drag to resize). Moving uses the CSS `translate` property, so
+// nothing reflows; resizing sets width and height. Everything is remembered.
+
+const PANELS_KEY = 'livewatch.panels';
+const PANEL_MIN = { w: 200, h: 140 };
+const panelBoxes = {};   // id -> { x, y, w, h } (w and h are null until the panel is resized)
+const panelEls = new Map();
+
+function applyPanel(id) {
+  const node = panelEls.get(id);
+  const box = panelBoxes[id];
+  node.style.setProperty('--px', `${box.x}px`);
+  node.style.setProperty('--py', `${box.y}px`);
+  node.style.width = box.w == null ? '' : `${box.w}px`;
+  node.style.height = box.h == null ? '' : `${box.h}px`;
+  node.classList.toggle('sized', box.w != null || box.h != null);
+}
+
+function savePanels() {
+  try { localStorage.setItem(PANELS_KEY, JSON.stringify(panelBoxes)); } catch { /* optional */ }
+}
+
+// Keep a good part of a panel on screen so it can always be grabbed again.
+function keepPanelReachable(id) {
+  const r = panelEls.get(id).getBoundingClientRect();
+  const box = panelBoxes[id];
+  const grab = Math.min(100, r.width / 2);
+  if (r.right < grab) box.x += grab - r.right;
+  if (r.left > innerWidth - grab) box.x -= r.left - (innerWidth - grab);
+  if (r.top + scrollY < 0) box.y -= r.top + scrollY;
+}
+
+function resetPanel(id) {
+  Object.assign(panelBoxes[id], { x: 0, y: 0, w: null, h: null });
+  applyPanel(id);
+  savePanels();
+}
+
+function resetPanels() {
+  for (const id of panelEls.keys()) resetPanel(id);
+}
+
+function initPanels() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(PANELS_KEY) || '{}') || {}; } catch { /* optional */ }
+  const num = (v) => (Number.isFinite(v) ? v : null);
+
+  for (const node of document.querySelectorAll('.panel[data-panel]')) {
+    const id = node.dataset.panel;
+    const widthOnly = node.dataset.size === 'width';
+    panelEls.set(id, node);
+    const sv = saved[id] || {};
+    panelBoxes[id] = {
+      x: num(sv.x) ?? 0, y: num(sv.y) ?? 0,
+      w: num(sv.w) == null ? null : Math.max(PANEL_MIN.w, sv.w),
+      h: widthOnly || num(sv.h) == null ? null : Math.max(PANEL_MIN.h, sv.h),
+    };
+
+    const grip = document.createElement('div');
+    grip.className = 'panelgrip';
+    grip.title = 'Drag to move this panel (double-click to reset)';
+    const handle = document.createElement('div');
+    handle.className = 'panelresize';
+    handle.title = 'Drag to resize this panel (double-click to reset)';
+    node.append(grip, handle);
+
+    let drag = null;
+    let lastPress = { t: 0, x: 0, y: 0 };
+    const press = (mode) => (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      bringToFront(node);
+      // Two quick presses in the same spot reset the panel (pointer capture hides the browser's dblclick).
+      if (e.timeStamp - lastPress.t < 400 && Math.hypot(e.clientX - lastPress.x, e.clientY - lastPress.y) < 8) {
+        lastPress.t = 0;
+        resetPanel(id);
+        return;
+      }
+      lastPress = { t: e.timeStamp, x: e.clientX, y: e.clientY };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      const box = panelBoxes[id];
+      drag = {
+        mode, pid: e.pointerId, sx: e.clientX, sy: e.clientY,
+        x: box.x, y: box.y, w: box.w ?? node.offsetWidth, h: box.h ?? node.offsetHeight,
+      };
+      node.classList.add(mode === 'move' ? 'dragging' : 'resizing');
+      document.body.classList.add('moving');
+    };
+    const move = (e) => {
+      if (!drag || e.pointerId !== drag.pid) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      const box = panelBoxes[id];
+      if (drag.mode === 'move') {
+        box.x = drag.x + dx;
+        box.y = drag.y + dy;
+      } else {
+        box.w = Math.max(PANEL_MIN.w, drag.w + dx);
+        if (!widthOnly) box.h = Math.max(PANEL_MIN.h, drag.h + dy);
+      }
+      applyPanel(id);
+    };
+    const end = (e) => {
+      if (!drag || e.pointerId !== drag.pid) return;
+      drag = null;
+      node.classList.remove('dragging', 'resizing');
+      document.body.classList.remove('moving');
+      keepPanelReachable(id);
+      applyPanel(id);
+      savePanels();
+    };
+    grip.addEventListener('pointerdown', press('move'));
+    handle.addEventListener('pointerdown', press('resize'));
+    for (const target of [grip, handle]) {
+      target.addEventListener('pointermove', move);
+      target.addEventListener('pointerup', end);
+      target.addEventListener('pointercancel', end);
+    }
+    // Touching anywhere on a moved or resized panel brings it in front of the others.
+    node.addEventListener('pointerdown', () => {
+      const box = panelBoxes[id];
+      if (box.x || box.y || box.w != null || box.h != null) bringToFront(node);
+    }, true);
+
+    applyPanel(id);
+    keepPanelReachable(id);
+    applyPanel(id);
+  }
+  addEventListener('resize', () => {
+    for (const id of panelEls.keys()) {
+      keepPanelReachable(id);
+      applyPanel(id);
+    }
   });
 }
 
@@ -1798,6 +1944,7 @@ setInterval(() => {
 el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 initSections();
 initBoardUnit();
+initPanels();
 buildBoard();
 render();
 

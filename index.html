@@ -28,31 +28,34 @@
       <div class="bar" id="barBottom" title="Drag to move the board (double-click to reset)"></div>
       <div class="boardresize" id="boardResize" title="Drag to resize the board (double-click to reset)"></div>
     </div>
-    <div class="controls">
-      <button id="first" title="First move (Home)">⏮</button>
-      <button id="prev" title="Previous move (←)">◀</button>
-      <button id="next" title="Next move (→)">▶</button>
-      <button id="live" title="Back to live (End)">Live</button>
-      <button id="flip" title="Flip board (F)">Flip</button>
-      <button id="sound" title="Move sound (M)">Sound on</button>
-      <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
-      <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
-      <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
-      <button id="tacticsToggle" title="Show tactics on the board: hanging pieces, winning trades, checks, mate… (T). Pick which ones in Analysis settings.">Tactics</button>
-      <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
-    </div>
-    <div id="legend" class="legend" hidden>
-      <span data-kind="mate"><i class="key mate"></i>Mate in one</span>
-      <span data-kind="hanging"><i class="key hanging"></i>Hanging piece</span>
-      <span data-kind="trade"><i class="key trade"></i>Winning trade</span>
-      <span data-kind="check"><i class="key check"></i>Check</span>
-      <span data-kind="queen"><i class="key queen"></i>Attacks the queen</span>
-      <span data-kind="capture"><i class="key capture"></i>Capture</span>
-      <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
+    <div class="controlpanel panel" id="controlpanel" data-panel="controls" data-size="width">
+      <div class="controls">
+        <button id="first" title="First move (Home)">⏮</button>
+        <button id="prev" title="Previous move (←)">◀</button>
+        <button id="next" title="Next move (→)">▶</button>
+        <button id="live" title="Back to live (End)">Live</button>
+        <button id="flip" title="Flip board (F)">Flip</button>
+        <button id="sound" title="Move sound (M)">Sound on</button>
+        <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
+        <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
+        <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
+        <button id="tacticsToggle" title="Show tactics on the board: hanging pieces, winning trades, checks, mate… (T). Pick which ones in Analysis settings.">Tactics</button>
+        <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
+      </div>
+      <div id="legend" class="legend" hidden>
+        <span data-kind="mate"><i class="key mate"></i>Mate in one</span>
+        <span data-kind="hanging"><i class="key hanging"></i>Hanging piece</span>
+        <span data-kind="trade"><i class="key trade"></i>Winning trade</span>
+        <span data-kind="check"><i class="key check"></i>Check</span>
+        <span data-kind="queen"><i class="key queen"></i>Attacks the queen</span>
+        <span data-kind="capture"><i class="key capture"></i>Capture</span>
+        <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
+      </div>
     </div>
   </section>
 
-  <aside class="side analysis" id="analysis">
+  <aside class="side analysis panel" id="analysis" data-panel="analysis" data-size="both">
+    <div class="pscroll">
     <div class="head-block">
       <p id="status" class="status">Connecting…</p>
       <div id="meta" class="meta"></div>
@@ -100,12 +103,13 @@
           <option value="4">4</option><option value="5">5</option>
         </select>
       </label>
-      <button id="boardReset" class="reset" type="button">Reset board position and size</button>
+      <button id="boardReset" class="reset" type="button">Reset layout (board and panels)</button>
       </div>
     </details>
+    </div>
   </aside>
 
-  <aside class="side movespanel" id="movespanel">
+  <aside class="side movespanel panel" id="movespanel" data-panel="moves" data-size="both">
     <h2 class="movestitle">Moves</h2>
     <ol id="moves" class="moves"></ol>
   </aside>
