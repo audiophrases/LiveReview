@@ -41,7 +41,7 @@ const el = {
   live: $('live'), flip: $('flip'), sound: $('sound'),
   userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
-  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'), legend: $('legend'), worst: $('worst'), tally: $('tally'),
+  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'), legend: $('legend'), worst: $('worst'), worstTitle: $('worstTitle'), tally: $('tally'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
   evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
@@ -903,18 +903,6 @@ function classify(i) {
   return null;
 }
 
-// The worst inaccuracy, mistake or blunder either side has played so far: { i, lost, kind }.
-function worstMove() {
-  const plies = state.game?.plies || [];
-  let worst = null;
-  for (let i = 1; i < plies.length; i++) {
-    const lost = moveLoss(i);
-    if (lost != null && lost >= 0.1 && (!worst || lost > worst.lost)) worst = { i, lost };
-  }
-  if (worst) worst.kind = classify(worst.i);
-  return worst;
-}
-
 // The same position with the other side to move (a "null move").
 function passTurn(fen) {
   const parts = fen.split(' ');
@@ -976,18 +964,20 @@ function playOnGrid(grid, m) {
   return g;
 }
 
-// Tactics open to the side to move, flagged by kind so each can be shown or hidden on its own:
+// Tactics open to the side to move, flagged by kind so each can be shown or hidden on its own.
+// Only ideas that matter are kept: each one has to win material (or mate) by the exchange count below.
 //   mate        checkmate in one
-//   fork        the moved piece attacks two or more targets worth it, and can't simply be taken
-//   skewer      a bishop, rook or queen lines up through a big piece (or the king) to one behind it
+//   fork        the moved piece attacks two or more targets it would win (or the king), and survives there
+//   skewer      a bishop, rook or queen hits a big piece (or the king); once it moves, the piece behind falls
 //   hanging     wins a piece (minor or bigger) that nothing defends
 //   removal     captures a piece that was guarding another, which can then be won
-//   discovered  moving a piece opens a line for a bishop, rook or queen onto a valuable target
+//   discovered  moving a piece opens a line onto a valuable target while the moved piece threatens too
 //   trade       wins material by capturing a defended piece, once every recapture is played out
-//   pin         a bishop, rook or queen pins a piece to a bigger one (or the king) behind it
-//   pressure    adds a second (or more) attacker on a piece, at least as many attackers as defenders
+//   pin         a bishop, rook or queen pins a piece to a bigger one (or the king) and the pinned piece can be won
+//   pressure    adds an attacker so that a defended piece can now be won (attackers vs defenders)
+// Forcing moves that win nothing by themselves are only offered when nothing above is on, and only if safe:
 //   check       gives check
-//   queen       makes a new attack on the enemy queen (discovered attacks included)
+//   queen       makes a new attack on the enemy queen with a cheaper piece (discovered attacks included)
 //   capture     any other capture
 // The zwischenzug needs the engine and is worked out separately (see zwischenzug()).
 const TACTIC_RANK = {
@@ -1102,20 +1092,34 @@ function bestCaptureOn(g, sq, color) {
   return best;
 }
 
-// Each detector returns what to draw with the move for that tactic, { lines: [{ from, to, dash }] },
-// or null when the move isn't that tactic. `after` is the board once m is played.
+// Each detector returns { lines, gain, key } or null when the move isn't that tactic (or isn't worth it):
+// lines are the extra lines drawn with the move ([{ from, to, dash }]), gain is the material it wins
+// (pawns), key names the idea so two moves doing the same thing are shown once.
+// `grid` is the board before the move m, `after` the board once it is played, `me` the side moving.
 
-// A fork: the moved piece attacks two or more targets at once, the king or any piece it would profit
-// from capturing (a trade that comes out ahead once the recaptures are played out).
-function detectFork(after, m, me) {
-  const targets = [];
-  for (const sq of attacksFrom(after, m.to)) {
-    const p = cellAt(after, sq);
+// The squares holding pieces of the other side that the piece on sq attacks, with what taking each would win.
+function targetsOf(g, sq, me) {
+  const out = [];
+  for (const t of attacksFrom(g, sq)) {
+    const p = cellAt(g, t);
     if (!p || colorOf(p) === me) continue;
-    if (typeOf(p) === 'k' || (SEE_VALUE[typeOf(p)] >= 3 && captureGain(after, m.to, sq) > 0)) targets.push(sq);
+    out.push({ sq: t, king: typeOf(p) === 'k', gain: typeOf(p) === 'k' ? Infinity : captureGain(g, sq, t) });
   }
+  return out;
+}
+
+function detectFork(after, m, me) {
+  if (pieceAtRisk(after, m.to) > 0) return null;  // the forking piece would just be taken
+  const targets = targetsOf(after, m.to, me).filter((t) => t.king || (SEE_VALUE[typeOf(cellAt(after, t.sq))] >= 3 && t.gain > 0));
   if (targets.length < 2) return null;
-  return { lines: targets.map((sq) => ({ from: m.to, to: sq })) };
+  // The opponent saves the most valuable target (or answers the check); the next one falls.
+  const gains = targets.map((t) => t.gain).sort((x, y) => y - x);
+  const captured = m.captured && !m.flags.includes('e') ? SEE_VALUE[m.captured] : 0;
+  return {
+    lines: targets.map((t) => ({ from: m.to, to: t.sq })),
+    gain: gains[1] + captured,
+    key: `fork:${targets.map((t) => t.sq).sort().join()}`,
+  };
 }
 
 // Pins and skewers made by the moved bishop, rook or queen: { pin, skewer }.
@@ -1123,8 +1127,6 @@ function detectLine(after, m, me) {
   const mover = cellAt(after, m.to);
   const dirs = slideDirs(typeOf(mover));
   if (!dirs || pieceAtRisk(after, m.to) > 0) return {};
-  const them = me === 'w' ? 'b' : 'w';
-  const vMover = SEE_VALUE[typeOf(mover)];
   const fx = m.from.charCodeAt(0) - m.to.charCodeAt(0);
   const fy = +m.from[1] - +m.to[1];
   const found = {};
@@ -1137,22 +1139,31 @@ function detectLine(after, m, me) {
     if (colorOf(A) === me || colorOf(B) === me) continue;
     const vA = SEE_VALUE[typeOf(A)];
     const vB = SEE_VALUE[typeOf(B)];
-    const winnable = (sq, v) => v > vMover || !attackersOf(after, sq, them).length;
-    if (vA < vB && vA >= 3 && (typeOf(B) === 'k' || winnable(b, vB))) {
-      found.pin ||= { lines: [{ from: m.to, to: b }] };
-    } else if (vA > vB && vB >= 3 && (typeOf(A) === 'k' || winnable(a, vA)) && winnable(b, vB)) {
-      found.skewer ||= { lines: [{ from: m.to, to: b }] };
+    if (vA < vB && vA >= 3) {
+      // A pin matters when the pinned piece, which can't step aside, can now be won.
+      const gain = bestCaptureOn(after, a, me).gain;
+      if (gain >= 1 && !(found.pin?.gain >= gain)) found.pin = { lines: [{ from: m.to, to: b }], gain, key: `pin:${a}` };
+    } else if (vA > vB && vB >= 3) {
+      // A skewer: once the front piece gets out of the way, the one behind is taken.
+      const g2 = after.map((row) => row.slice());
+      g2[8 - +a[1]][a.charCodeAt(0) - 97] = null;
+      const gain = captureGain(g2, m.to, b);
+      if (gain >= 2 && !(found.skewer?.gain >= gain)) found.skewer = { lines: [{ from: m.to, to: b }], gain, key: `skewer:${b}` };
     }
   }
   return found;
 }
 
-// A bishop, rook or queen behind the moved piece now hits something worth it.
-function detectDiscovered(after, m, me) {
+// A bishop, rook or queen behind the moved piece now hits something, while the moved piece threatens too
+// (or gives a discovered check while it captures or attacks something).
+function detectDiscovered(grid, after, m, me) {
   if (m.flags.includes('k') || m.flags.includes('q')) return null;
+  // What the moved piece achieves on its own: a capture, or a second target it would win.
+  const moverHits = targetsOf(after, m.to, me).filter((t) => !t.king && t.gain >= 2);
+  let best = null;
   for (const [df, dr] of [...DIAGONALS, ...ORTHOGONALS]) {
     const [behind] = piecesAlong(after, m.from, -df, -dr, 1);
-    if (!behind) continue;
+    if (!behind || behind === m.to) continue;  // the moved piece itself is not a discovery
     const S = cellAt(after, behind);
     if (colorOf(S) !== me || !slideDirs(typeOf(S))?.some(([x, y]) => x === df && y === dr)) continue;
     const [target] = piecesAlong(after, m.from, df, dr, 1);
@@ -1160,15 +1171,24 @@ function detectDiscovered(after, m, me) {
     const T = cellAt(after, target);
     if (colorOf(T) === me) continue;
     const check = typeOf(T) === 'k';
-    if (check || captureGain(after, behind, target) >= 2) {
-      return { lines: [{ from: behind, to: target }] };
-    }
+    const hits = moverHits.filter((t) => t.sq !== target);
+    const captured = m.captured && !m.flags.includes('e')
+      ? (check ? SEE_VALUE[m.captured] : exchangeGain(grid, m)) : 0;
+    const moverGain = Math.max(captured, ...hits.map((t) => t.gain), 0);
+    // A discovered check lets the moved piece take or win what it hits; otherwise the opponent saves the bigger piece.
+    const gain = check ? moverGain : Math.min(captureGain(after, behind, target), moverGain);
+    if (gain < 1 || (best && best.gain >= gain)) continue;
+    const lines = [{ from: behind, to: target }];
+    const hit = hits.sort((x, y) => y.gain - x.gain)[0];
+    if (hit && hit.gain >= captured) lines.push({ from: m.to, to: hit.sq });
+    best = { lines, gain, key: `disc:${behind}${target}` };
   }
-  return null;
+  return best;
 }
 
-// The move adds an attacker on a piece now attacked at least twice and no less than it is defended.
+// The move adds an attacker so that a defended piece, safe until now, can be won (attackers vs defenders).
 function detectPressure(grid, after, m, me) {
+  if (pieceAtRisk(after, m.to) > 0) return null;
   const them = me === 'w' ? 'b' : 'w';
   let best = null;
   for (const sq of attacksFrom(after, m.to)) {
@@ -1176,36 +1196,43 @@ function detectPressure(grid, after, m, me) {
     if (!p || colorOf(p) === me || typeOf(p) === 'k' || SEE_VALUE[typeOf(p)] < 3) continue;
     const attackers = attackersOf(after, sq, me);
     const defenders = attackersOf(after, sq, them);
-    if (attackers.length < 2 || attackers.length < defenders.length) continue;
-    if (attackersOf(grid, sq, me).filter((x) => x !== m.from).length >= attackers.length) continue;
-    if (best && SEE_VALUE[typeOf(p)] <= best.value) continue;
+    if (attackers.length < 2 || !defenders.length) continue;
+    if (bestCaptureOn(grid, sq, me).gain > 0) continue;  // already winnable: this move isn't what does it
+    const gain = bestCaptureOn(after, sq, me).gain;
+    if (gain < 1 || (best && best.gain >= gain)) continue;
     best = {
-      value: SEE_VALUE[typeOf(p)],
-      target: sq,
       lines: [
-        ...attackers.map((a) => ({ from: a, to: sq })),
-        ...defenders.map((d) => ({ from: d, to: sq, dash: true })),
+        ...attackers.filter((x) => x !== m.to).map((x) => ({ from: x, to: sq })),
+        { from: m.to, to: sq },
+        ...defenders.map((x) => ({ from: x, to: sq, dash: true })),
       ],
+      gain,
+      key: `pressure:${sq}`,
     };
   }
-  return best && { lines: best.lines, target: best.target };
+  return best;
 }
 
 // Capturing a piece that guarded another, which can then be won.
 function detectRemoval(grid, after, m, me) {
-  if (!m.captured || m.flags.includes('e') || exchangeGain(grid, m) < 0) return null;
+  if (!m.captured || m.flags.includes('e')) return null;
+  const first = exchangeGain(grid, m);
+  if (first < 0) return null;
+  let best = null;
   for (const sq of attacksFrom(grid, m.to)) {
     const T = cellAt(grid, sq);
     if (!T || colorOf(T) === me || typeOf(T) === 'k' || SEE_VALUE[typeOf(T)] < 3) continue;
     if (bestCaptureOn(grid, sq, me).gain >= 2) continue;  // already winnable: nothing needed removing
     const next = bestCaptureOn(after, sq, me);
-    if (next.gain >= 2) return { lines: [{ from: next.from, to: sq, dash: true }] };
+    if (next.gain < 2 || (best && best.gain >= next.gain + first)) continue;
+    best = { lines: [{ from: next.from, to: sq, dash: true }], gain: next.gain + first, key: `removal:${sq}` };
   }
-  return null;
+  return best;
 }
 
-// Every tactical idea for the side to move: [{ from, to, kinds: [...], extra: { kind: {...} }, gain, cost }],
-// whatever the settings.
+// Every tactical idea for the side to move, whatever the settings:
+// [{ from, to, cost, kinds: [...], extra: { kind: { lines, gain, key, safe } } }].
+const FORCING_KINDS = new Set(['check', 'queen', 'capture']);
 const tacticsCache = new Map();
 function tacticMoves(fen) {
   if (tacticsCache.has(fen)) return tacticsCache.get(fen);
@@ -1218,97 +1245,101 @@ function tacticMoves(fen) {
     // Pieces already hitting the queen don't count as new attacks.
     const before = new Set(queens.flatMap((q) => attackersOf(grid, q, me)));
     for (const m of chess.moves({ verbose: true })) {
-      const kinds = [];
-      let gain = 0;
-      if (m.san.endsWith('#')) kinds.push('mate');
-      else if (m.san.endsWith('+')) kinds.push('check');
+      const after = playOnGrid(grid, m);
+      const safe = pieceAtRisk(after, m.to) <= 0;
+      const extra = {};
+      const note = (kind, info) => { if (info) extra[kind] = info; };
+      if (m.san.endsWith('#')) note('mate', { lines: [], gain: 1000, key: `mate:${m.from}${m.to}` });
+      else if (m.san.endsWith('+')) note('check', { lines: [], gain: 0, key: `check:${m.from}${m.to}`, safe });
       if (m.captured) {
-        kinds.push('capture');
+        note('capture', { lines: [], gain: 0, key: `capture:${m.from}${m.to}`, safe });
         if (!m.flags.includes('e')) {
-          const defended = attackersOf(playOnGrid(grid, m), m.to, them).length > 0;
+          const defended = attackersOf(after, m.to, them).length > 0;
           if (!defended && SEE_VALUE[m.captured] >= 3) {
-            kinds.push('hanging');
-            gain = SEE_VALUE[m.captured];
+            note('hanging', { lines: [], gain: SEE_VALUE[m.captured], key: `win:${m.to}` });
           } else if (defended) {
-            gain = exchangeGain(grid, m);
-            if (gain >= 1) kinds.push('trade');
+            const gain = exchangeGain(grid, m);
+            if (gain >= 1) note('trade', { lines: [], gain, key: `win:${m.to}` });
           }
         }
       }
-      const after = playOnGrid(grid, m);
-      if (queens.length && m.captured !== 'q') {
-        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) kinds.push('queen');
+      if (queens.length && m.captured !== 'q' && SEE_VALUE[m.piece] < 9) {
+        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) {
+          note('queen', { lines: [], gain: 0, key: `queen:${m.from}${m.to}`, safe });
+        }
       }
-      const extra = {};
-      const note = (kind, info) => {
-        if (!info) return;
-        kinds.push(kind);
-        extra[kind] = info;
-      };
       note('fork', detectFork(after, m, me));
       const line = detectLine(after, m, me);
       note('pin', line.pin);
       note('skewer', line.skewer);
-      note('discovered', detectDiscovered(after, m, me));
+      note('discovered', detectDiscovered(grid, after, m, me));
       note('pressure', detectPressure(grid, after, m, me));
       note('removal', detectRemoval(grid, after, m, me));
+      const kinds = Object.keys(extra);
       if (!kinds.length) continue;
       const key = m.from + m.to;
       const old = found.get(key);
       if (old) {
-        for (const k of kinds) if (!old.kinds.includes(k)) old.kinds.push(k);
-        for (const k in extra) old.extra[k] ||= extra[k];
-        old.gain = Math.max(old.gain, gain);
+        for (const k of kinds) if (!old.extra[k]) { old.extra[k] = extra[k]; old.kinds.push(k); }
       } else {
-        found.set(key, { from: m.from, to: m.to, kinds, extra, gain, cost: SEE_VALUE[m.piece] });
-      }
-    }
-    // Of several pieces that can win the same target, only the best one (most gain, then cheapest) is marked.
-    for (const kind of ['hanging', 'trade']) {
-      const byTarget = new Map();
-      for (const t of found.values()) {
-        if (!t.kinds.includes(kind)) continue;
-        const best = byTarget.get(t.to);
-        if (!best || t.gain > best.gain || (t.gain === best.gain && t.cost < best.cost)) {
-          if (best) best.kinds.splice(best.kinds.indexOf(kind), 1);
-          byTarget.set(t.to, t);
-        } else {
-          t.kinds.splice(t.kinds.indexOf(kind), 1);
-        }
-      }
-    }
-    // Likewise one "attackers vs defenders" move per pressured piece: the cheapest piece doing it.
-    const byPressured = new Map();
-    for (const t of found.values()) {
-      if (!t.kinds.includes('pressure')) continue;
-      const target = t.extra.pressure.target;
-      const best = byPressured.get(target);
-      const drop = (x) => x.kinds.splice(x.kinds.indexOf('pressure'), 1);
-      if (!best || t.cost < best.cost) {
-        if (best) drop(best);
-        byPressured.set(target, t);
-      } else {
-        drop(t);
+        found.set(key, { from: m.from, to: m.to, cost: SEE_VALUE[m.piece], kinds, extra });
       }
     }
   }
-  const result = [...found.values()].filter((t) => t.kinds.length);
+  const result = [...found.values()];
   if (tacticsCache.size > 2000) tacticsCache.clear();
   tacticsCache.set(fen, result);
   return result;
 }
 
-// What to draw: the kinds switched on in settings, one arrow per move showing its most important kind.
-function tactics(fen) {
-  const out = [];
+// Which of two candidate arrows is worth more: more material first, then the stronger kind, then the cheaper piece.
+function strongerTactic(a, b) {
+  if (a.gain !== b.gain) return a.gain > b.gain;
+  if (TACTIC_RANK[a.kind] !== TACTIC_RANK[b.kind]) return TACTIC_RANK[a.kind] > TACTIC_RANK[b.kind];
+  return a.cost < b.cost;
+}
+
+// What to draw for the side to move in `fen`: a mate if there is one (and nothing else), otherwise the
+// `max` ideas that win the most, each idea once and each move once with its most valuable kind. When
+// nothing wins material, one safe forcing move (check, attack on the queen, capture) may be offered.
+function tactics(fen, { max = 3, forcing = true } = {}) {
+  const ideas = new Map();
   for (const t of tacticMoves(fen)) {
-    let kind = null;
-    for (const k of t.kinds) {
-      if (state.opts[TACTIC_OPT[k]] && (!kind || TACTIC_RANK[k] > TACTIC_RANK[kind])) kind = k;
+    let best = null;
+    for (const kind of t.kinds) {
+      if (!state.opts[TACTIC_OPT[kind]]) continue;
+      const info = t.extra[kind];
+      if (FORCING_KINDS.has(kind) && !info.safe) continue;
+      const c = { from: t.from, to: t.to, cost: t.cost, kind, lines: info.lines, gain: info.gain, key: info.key };
+      if (!best || strongerTactic(c, best)) best = c;
     }
-    if (kind) out.push({ from: t.from, to: t.to, kind, extra: t.extra[kind] || null });
+    if (best && (!ideas.has(best.key) || strongerTactic(best, ideas.get(best.key)))) ideas.set(best.key, best);
   }
-  return out;
+  const all = [...ideas.values()].sort((a, b) => (strongerTactic(a, b) ? -1 : 1));
+  const mates = all.filter((c) => c.kind === 'mate');
+  if (mates.length) return mates.slice(0, 2);
+  const winning = all.filter((c) => !FORCING_KINDS.has(c.kind) && c.gain >= 1).slice(0, max);
+  if (winning.length || !forcing) return winning;
+  return all.filter((c) => FORCING_KINDS.has(c.kind)).slice(0, 1);
+}
+
+// The tactic the last move just carried out, if any (a fork, pin, skewer... now standing on the board):
+// { kind, lines } for the most valuable enabled one.
+function lastMoveTactic(idx) {
+  const plies = state.game?.plies;
+  const ply = plies?.[idx];
+  const prev = plies?.[idx - 1];
+  if (!ply?.lm || !prev) return null;
+  const uci = castleFix(prev.fen, ply.lm);
+  const t = tacticMoves(prev.fen).find((x) => x.from === uci.slice(0, 2) && x.to === uci.slice(2, 4));
+  if (!t) return null;
+  let best = null;
+  for (const kind of ['fork', 'skewer', 'discovered', 'pin', 'pressure', 'removal']) {
+    const info = t.extra[kind];
+    if (!info || !state.opts[TACTIC_OPT[kind]]) continue;
+    if (!best || info.gain > best.gain) best = { kind, lines: info.lines, gain: info.gain };
+  }
+  return best;
 }
 
 // Zwischenzug: our piece was just captured and we can take back, but the engine's best move is
@@ -1530,36 +1561,48 @@ function dropLabel(best, alt, s) {
   return d < 0.05 ? '0.0' : `-${d.toFixed(d >= 10 ? 0 : 1)}`;
 }
 
-// The worst move of the game so far as a little board that jumps there when clicked.
+// Every blunder of the game so far, in move order, each as a little board that jumps there when clicked.
+function blunderMoves() {
+  const plies = state.game?.plies || [];
+  const out = [];
+  for (let i = 1; i < plies.length; i++) if (plies[i] && plies[i - 1] && classify(i) === 'blunder') out.push(i);
+  return out;
+}
+
+function blunderCard(i, idx) {
+  const game = state.game;
+  const prev = game.plies[i - 1];
+  const cur = game.plies[i];
+  const better = evals.get(prev.fen)?.lines[0];
+  const color = prev.fen.split(' ')[1] === 'w' ? 'white' : 'black';
+  const name = game.info?.players?.[color]?.user?.name || cap(color);
+  return `<button class="worst-card${idx === i ? ' cur' : ''}" data-ply="${i}" title="Show this move on the board">` +
+    miniBoardHtml(cur.fen, cur.lm, castleFix(prev.fen, cur.lm).slice(2, 4), 'blunder') +
+    '<span class="worst-info">' +
+    `<span><span class="sym k-blunder">${KINDS.blunder.sym}</span> <b>${esc(moveLabel(i))}</b></span>` +
+    `<span class="muted">${esc(name)}</span>` +
+    `<span>${evalText(prev.fen)} → ${evalText(cur.fen)}</span>` +
+    (better ? `<span class="muted">Best was <b>${esc(toSan(prev.fen, better.pv[0]))}</b></span>` : '') +
+    '</span></button>';
+}
+
 let worstHtml = '';
 function renderWorst(idx) {
   const game = state.game;
   let html = '';
+  let count = 0;
   if (game && state.opts.worst && canAnalyse(game) && game.plies.length > 1) {
-    const w = worstMove();
-    if (!w) {
-      html = '<p class="worst-none">No inaccuracies or worse yet.</p>';
-    } else {
-      const prev = game.plies[w.i - 1];
-      const cur = game.plies[w.i];
-      const better = evals.get(prev.fen)?.lines[0];
-      const color = prev.fen.split(' ')[1] === 'w' ? 'white' : 'black';
-      const name = game.info?.players?.[color]?.user?.name || cap(color);
-      html =
-        `<button class="worst-card${idx === w.i ? ' cur' : ''}" data-ply="${w.i}" title="Show this move on the board">` +
-        miniBoardHtml(cur.fen, cur.lm, castleFix(prev.fen, cur.lm).slice(2, 4), w.kind) +
-        '<span class="worst-info">' +
-        `<span><span class="sym k-${w.kind}">${KINDS[w.kind].sym}</span> <b>${esc(moveLabel(w.i))}</b></span>` +
-        `<span class="muted">${esc(name)} · ${KINDS[w.kind].word.toLowerCase()}</span>` +
-        `<span>${evalText(prev.fen)} → ${evalText(cur.fen)}</span>` +
-        (better ? `<span class="muted">Best was <b>${esc(toSan(prev.fen, better.pv[0]))}</b></span>` : '') +
-        '</span></button>';
-    }
+    const list = blunderMoves();
+    count = list.length;
+    html = count
+      ? `<div class="worst-list">${list.map((i) => blunderCard(i, idx)).join('')}</div>`
+      : '<p class="worst-none">No blunders yet.</p>';
   }
   if (html !== worstHtml) {
     el.worst.innerHTML = html;
     worstHtml = html;
   }
+  el.worstTitle.textContent = count ? `Blunder previews (${count})` : 'Blunder previews';
 }
 
 function miniBoardHtml(fen, lm, hit, kind) {
@@ -1665,27 +1708,41 @@ function drawArrows(ply, engineArrows) {
   const list = [];
   const variant = state.game?.info?.variant?.key || 'standard';
   if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
-    const add = (fen, dash) => {
-      for (const t of tactics(fen)) {
+    const seen = new Set();  // one arrow per pair of squares, whoever draws it first
+    const push = (a) => {
+      if (a.from === a.to || seen.has(a.from + a.to)) return;
+      seen.add(a.from + a.to);
+      list.push(a);
+    };
+    const add = (picked, dash) => {
+      for (const t of picked) {
         const color = TACTIC_COLOR[t.kind];
-        const opacity = dash ? 0.55 : 0.85;
-        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash });
+        const opacity = dash ? 0.6 : 0.9;
+        push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.11, opacity, dash });
         // The idea behind the move: fork targets, the pinned line, the unmasked attacker, the defenders...
-        for (const x of t.extra?.lines || []) {
-          if (x.from === x.to) continue;
-          list.push({ from: x.from, to: x.to, color, width: 0.055, opacity: opacity * 0.85, dash: dash || x.dash });
-        }
+        for (const x of t.lines) push({ from: x.from, to: x.to, color, width: 0.06, opacity: opacity * 0.85, dash: dash || x.dash });
       }
     };
-    // Passing the turn is meaningless while the side to move is in check.
-    if (state.opts.threats && !findCheckedKing(ply.fen)) add(passTurn(ply.fen), true);
-    add(ply.fen, false);
-    if (state.opts.tZwischen && state.analysis) {
-      const z = zwischenzug(currentIndex());
+    const idx = currentIndex();
+    const mine = tactics(ply.fen);
+    const mating = mine.some((t) => t.kind === 'mate');
+    if (!mating) {
+      // What the opponent's last move set up (a fork now on the board...), then what they threaten next.
+      const last = lastMoveTactic(idx);
+      if (last) {
+        const color = TACTIC_COLOR[last.kind];
+        for (const x of last.lines) push({ from: x.from, to: x.to, color, width: 0.07, opacity: 0.6, dash: true });
+      }
+      // Passing the turn is meaningless while the side to move is in check.
+      if (state.opts.threats && !findCheckedKing(ply.fen)) add(tactics(passTurn(ply.fen), { max: 2, forcing: false }), true);
+    }
+    add(mine, false);
+    if (!mating && state.opts.tZwischen && state.analysis) {
+      const z = zwischenzug(idx);
       if (z) {
         const color = TACTIC_COLOR.zwischen;
-        list.push({ from: z.from, to: z.to, color, width: 0.11, opacity: 0.9 });
-        list.push({ from: z.later.slice(0, 2), to: z.later.slice(2, 4), color, width: 0.055, opacity: 0.75, dash: true });
+        push({ from: z.from, to: z.to, color, width: 0.11, opacity: 0.9 });
+        push({ from: z.later.slice(0, 2), to: z.later.slice(2, 4), color, width: 0.06, opacity: 0.75, dash: true });
       }
     }
   }

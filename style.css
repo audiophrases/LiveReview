@@ -348,7 +348,7 @@ a { color: var(--accent); }
 .controls #bestToggle.on { background: #2f7fd8; border-color: #2f7fd8; color: #fff; }
 .controls button:disabled { opacity: 0.5; cursor: default; }
 
-/* ---------- alternatives, tactics, biggest mistake ---------- */
+/* ---------- alternatives, tactics, blunder previews ---------- */
 .engine .drop {
   flex: none;
   font-size: 11px;
@@ -414,7 +414,6 @@ a { color: var(--accent); }
 @media (max-width: 860px) {
   .thumb { width: 88px; }
 }
-.worst-card.cur::after { content: "on the board"; align-self: flex-start; margin-left: auto; font-size: 11px; color: var(--accent); white-space: nowrap; }
 
 .settings .hint { color: var(--muted); font-size: 11px; margin-left: auto; }
 .subopts { margin: 0 0 4px 22px; padding-left: 10px; border-left: 2px solid var(--line); }
@@ -510,3 +509,8 @@ a { color: var(--accent); }
 body.moving, body.moving * { user-select: none !important; -webkit-user-select: none !important; cursor: grabbing; }
 
 .pickfolder.resume { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+/* every blunder as a small card; as many columns as the panel width allows */
+.worst-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.worst-list .worst-card { gap: 8px; padding: 5px; }
+.worst-list .thumb { width: 80px; }
