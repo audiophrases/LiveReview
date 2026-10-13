@@ -276,7 +276,7 @@ a { color: var(--accent); }
 .evalbar.flipped.black-ahead span { top: auto; bottom: 4px; }
 
 .board { position: relative; }
-.board svg.arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.board svg.arrows { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
 
 .engine { font-size: 13px; }
 .engine .head { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
@@ -343,6 +343,50 @@ a { color: var(--accent); }
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
   pointer-events: none;
 }
+.badge-cluster {
+  position: absolute;
+  top: 1%;
+  right: 1%;
+  z-index: 3;
+  width: 98%;
+  height: 38%;
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: flex-start;
+  align-items: flex-start;
+  gap: 1%;
+  pointer-events: none;
+}
+.badge-cluster > .badge {
+  position: static;
+  flex: 0 0 38%;
+  min-width: 0;
+  height: 100%;
+}
+.badge-cluster > .tactic-badge {
+  flex-basis: 30%;
+  width: 30%;
+  height: 79%;
+  padding: 0;
+  border: 0;
+  background: var(--tactic-badge-color);
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+}
+.t-undefended { --tactic-badge-color: #f15b6b; }
+.t-pinned { --tactic-badge-color: #444844; }
+.t-checkable { --tactic-badge-color: #287dce; }
+.t-mate { --tactic-badge-color: #e83d4b; }
+.tactic-badge svg { width: 78%; height: 78%; display: block; overflow: visible; }
+.tactic-badge:hover { filter: brightness(1.1); }
+.tactic-badge:focus-visible, .tactic-badge[aria-pressed="true"] {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 3px #22201c;
+}
+.sq .coord { z-index: 2; }
+.sq:has(.badge-cluster > :nth-child(3)) .coord.rank { top: 40%; }
 .board { overflow: visible; }
 .board .sq:first-child { border-top-left-radius: 4px; }
 
@@ -382,9 +426,19 @@ a { color: var(--accent); }
 .legend .key { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
 .legend [hidden] { display: none; }
 .legend .key.mate { background: #8e1b1b; height: 4px; }
-.legend .key.hanging { background: #e58f2a; }
-.legend .key.trade { background: #2e9d57; }
-.legend .key.check { background: #d6352b; }
+.legend .key.badge-key {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tactic-badge-color);
+  color: #fff;
+  font: 800 13px/1 system-ui, sans-serif;
+  font-style: normal;
+}
+.legend .badge-key svg { width: 13px; height: 13px; }
 .legend .key.queen { background: #a24bd1; }
 .legend .key.capture { background: #6f6f78; }
 .legend .key.fork { background: #e91e63; }
@@ -431,6 +485,9 @@ a { color: var(--accent); }
 .settings .hint { color: var(--muted); font-size: 11px; margin-left: auto; }
 .subopts { margin: 0 0 4px 22px; padding-left: 10px; border-left: 2px solid var(--line); }
 .subopts.off { opacity: 0.55; }
+.tactic-group { margin: 8px 0 3px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.tactic-group:first-child { margin-top: 4px; }
+.tactic-hint { margin: 3px 0 8px; color: var(--muted); font-size: 11px; }
 
 /* ---------- movable, resizable board ----------
    The board, its eval bar, the player bars and every arrow and badge are one box. It is moved and

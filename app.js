@@ -63,7 +63,7 @@ const state = {
   analysis: true,
   opts: {
     bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
-    tactics: false, tMate: true, tHanging: true, tTrade: true, tCheck: true, tQueen: true, tCapture: false,
+    tactics: false, tMate: true, tUndefended: true, tPinned: true, tCheckable: true, tQueen: true, tCapture: false,
     tFork: true, tPin: true, tSkewer: true, tDiscovered: true, tPressure: true, tRemoval: true, tZwischen: true,
     threats: false, depth: 18, multipv: 3,
   },
@@ -71,7 +71,15 @@ const state = {
 try {
   state.analysis = localStorage.getItem(ENGINE_KEY) !== 'off';
   state.sound = localStorage.getItem(SOUND_KEY) !== 'off';
-  Object.assign(state.opts, JSON.parse(localStorage.getItem(OPTS_KEY) || '{}'));
+  const saved = JSON.parse(localStorage.getItem(OPTS_KEY) || '{}') || {};
+  Object.assign(state.opts, saved);
+  // Carry the old arrow preferences into their replacement position badges.
+  if (!('tUndefended' in saved) && ('tHanging' in saved || 'tTrade' in saved)) {
+    state.opts.tUndefended = (saved.tHanging ?? true) || (saved.tTrade ?? true);
+  }
+  if (!('tPinned' in saved) && 'tPin' in saved) state.opts.tPinned = !!saved.tPin;
+  if (!('tCheckable' in saved) && 'tCheck' in saved) state.opts.tCheckable = !!saved.tCheck;
+  for (const retired of ['tHanging', 'tTrade', 'tCheck']) delete state.opts[retired];
 } catch { /* optional */ }
 
 function saveOpts() {
@@ -987,10 +995,13 @@ const TACTIC_RANK = {
   discovered: 7, removal: 8, hanging: 9, skewer: 10, fork: 11, mate: 12,
 };
 const TACTIC_OPT = {
-  mate: 'tMate', fork: 'tFork', skewer: 'tSkewer', hanging: 'tHanging', removal: 'tRemoval',
-  discovered: 'tDiscovered', trade: 'tTrade', pin: 'tPin', pressure: 'tPressure',
-  check: 'tCheck', queen: 'tQueen', capture: 'tCapture', zwischen: 'tZwischen',
+  mate: 'tMate', fork: 'tFork', skewer: 'tSkewer', removal: 'tRemoval',
+  discovered: 'tDiscovered', pin: 'tPin', pressure: 'tPressure',
+  queen: 'tQueen', capture: 'tCapture', zwischen: 'tZwischen',
 };
+const BADGE_OPT = { undefended: 'tUndefended', pinned: 'tPinned', checkable: 'tCheckable', mate: 'tMate', mateStatus: 'tMate' };
+// Keep these detectors for evaluating combinations, but position badges replace their arrows.
+const BADGED_TACTICS = new Set(['hanging', 'trade', 'check']);
 const SEE_VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 100 };
 
 // Static exchange evaluation: what the mover nets by making the capture m on its square when both
@@ -1303,10 +1314,10 @@ function strongerTactic(a, b) {
 
 // What to draw for the side to move in `fen`: a mate if there is one (and nothing else), otherwise the
 // `max` ideas that win the most, each idea once and each move once with its most valuable kind. When
-// nothing wins material, one safe forcing move (check, attack on the queen, capture) may be offered.
+// nothing wins material, one safe attack on the queen or optional capture may be offered.
 // Every winning idea has to stand up to the opponent's best reply (see forcedWins()), which also
 // turns up the mates in two the rules above don't see.
-function tactics(fen, { max = 3, forcing = true } = {}) {
+function tactics(fen, { max = 2, forcing = true } = {}) {
   const verdict = forcedWins(fen);
   const ideas = new Map();
   const consider = (c) => {
@@ -1315,6 +1326,7 @@ function tactics(fen, { max = 3, forcing = true } = {}) {
   for (const t of tacticMoves(fen)) {
     let best = null;
     for (const kind of t.kinds) {
+      if (BADGED_TACTICS.has(kind)) continue;
       if (!state.opts[TACTIC_OPT[kind]]) continue;
       const info = t.extra[kind];
       if (FORCING_KINDS.has(kind) && !info.safe) continue;
@@ -1368,7 +1380,7 @@ function lastMoveTactic(idx) {
   const t = tacticMoves(prev.fen).find((x) => x.from === uci.slice(0, 2) && x.to === uci.slice(2, 4));
   if (!t || forcedWins(prev.fen).gainOf(t.from + t.to) === null) return null;
   let best = null;
-  for (const kind of ['fork', 'skewer', 'discovered', 'pin', 'pressure', 'removal']) {
+  for (const kind of ['fork', 'skewer', 'discovered', 'removal']) {
     const info = t.extra[kind];
     if (!info || !state.opts[TACTIC_OPT[kind]]) continue;
     if (!best || info.gain > best.gain) best = { kind, lines: info.lines, gain: info.gain };
@@ -1887,7 +1899,9 @@ function renderControls() {
   el.tacticsToggle.classList.toggle('on', state.opts.tactics);
   el.legend.hidden = !state.opts.tactics;
   el.legend.classList.toggle('threats', state.opts.threats);
-  for (const item of el.legend.querySelectorAll('[data-kind]')) item.hidden = !state.opts[TACTIC_OPT[item.dataset.kind]];
+  for (const item of el.legend.querySelectorAll('[data-kind]')) {
+    item.hidden = !state.opts[BADGE_OPT[item.dataset.kind] || TACTIC_OPT[item.dataset.kind]];
+  }
   el.subopts.classList.toggle('off', !state.opts.tactics);
   for (const input of el.settings.querySelectorAll('[data-opt]')) {
     const v = state.opts[input.dataset.opt];
@@ -2112,9 +2126,58 @@ const TACTIC_COLOR = {
   discovered: '#ef6c00', trade: '#2e9d57', pin: '#00a3a3', pressure: '#546e7a',
   check: '#d6352b', queen: '#a24bd1', capture: '#6f6f78', zwischen: '#b8860b',
 };
+const BADGE_COLOR = { undefended: '#f15b6b', pinned: '#444844', checkable: '#287dce', mate: '#e83d4b' };
+const BADGE_ICON = {
+  undefended: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v6c0 5-8 9-8 9s-8-4-8-9V6Z" fill="currentColor"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="var(--tactic-badge-color)" stroke-width="2" stroke-linecap="round"/></svg>',
+  pinned: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v3h-2v5l3 3v2h-5v5h-2v-5H6v-2l3-3V6H7Z" fill="currentColor"/></svg>',
+  checkable: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"/></svg>',
+  mate: '#',
+};
+const badgeInteraction = { fen: null, pinned: null, hovered: null, focused: null };
+let renderedEngineArrows = [];
+
+function positionBadges(ply) {
+  const variant = state.game?.info?.variant?.key || 'standard';
+  return state.opts.tactics && ply && ANALYSABLE.includes(variant) ? TacticBadges.analyze(ply.fen, variant) : null;
+}
+
+function activePositionBadge(ply) {
+  if (badgeInteraction.fen !== ply?.fen) return null;
+  const selected = badgeInteraction.hovered || badgeInteraction.focused || badgeInteraction.pinned;
+  if (!selected) return null;
+  const [square, kind] = selected.split(':');
+  if (!state.opts[BADGE_OPT[kind]]) return null;
+  return positionBadges(ply)?.badges[square]?.find((b) => b.kind === kind) || null;
+}
+
+function refreshBadgeExplanation() {
+  const ply = state.game?.plies[currentIndex()];
+  for (const button of el.board.querySelectorAll('[data-badge-kind]')) {
+    button.setAttribute('aria-pressed', String(badgeInteraction.pinned === `${button.dataset.badgeSquare}:${button.dataset.badgeKind}`));
+  }
+  drawArrows(ply, renderedEngineArrows);
+}
+
+function squareBadges(name, quality, position) {
+  const order = { mate: 0, pinned: 1, undefended: 2, checkable: 3 };
+  const badges = (position?.badges[name] || []).filter((b) => state.opts[BADGE_OPT[b.kind]])
+    .slice().sort((a, b) => order[a.kind] - order[b.kind]);
+  const parts = [];
+  const tactic = (b) => {
+    const pressed = badgeInteraction.pinned === `${name}:${b.kind}`;
+    return `<button type="button" class="badge tactic-badge t-${b.kind}" data-badge-square="${name}" data-badge-kind="${b.kind}" title="${esc(b.title)}" aria-label="${esc(b.title)}" aria-pressed="${pressed}">${BADGE_ICON[b.kind]}</button>`;
+  };
+  for (const b of badges.filter((b) => b.kind === 'mate')) parts.push(tactic(b));
+  if (quality?.square === name) {
+    parts.push(`<span class="badge k-${quality.kind}" title="${KINDS[quality.kind].word}">${KINDS[quality.kind].sym}</span>`);
+  }
+  for (const b of badges.filter((b) => b.kind !== 'mate')) parts.push(tactic(b));
+  return parts.length ? `<span class="badge-cluster">${parts.join('')}</span>` : '';
+}
 
 // Tactics underneath (the opponent's threats lowest), engine arrows on top, labels over everything.
 function drawArrows(ply, engineArrows) {
+  renderedEngineArrows = engineArrows;
   let svg = el.board.querySelector('svg.arrows');
   if (!svg) {
     svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -2161,6 +2224,13 @@ function drawArrows(ply, engineArrows) {
         push({ from: z.from, to: z.to, color, width: 0.11, opacity: 0.9 });
         push({ from: z.later.slice(0, 2), to: z.later.slice(2, 4), color, width: 0.06, opacity: 0.75, dash: true });
       }
+    }
+  }
+  // A badge explains one position feature on demand; suggestions remain a separate layer.
+  const explanation = activePositionBadge(ply);
+  if (explanation) {
+    for (const line of explanation.lines) {
+      if (line.from !== line.to) list.push({ ...line, color: BADGE_COLOR[explanation.kind], width: 0.075, opacity: 0.95 });
     }
   }
   for (const a of engineArrows) list.push({ ...a, from: a.uci.slice(0, 2), to: a.uci.slice(2, 4) });
@@ -2216,7 +2286,19 @@ function renderBoard(ply, idx) {
   const black = (state.orientation === 'black') !== state.flipped;
   const grid = ply ? fenGrid(ply.fen) : [];
   const lastSquares = ply?.lm ? [ply.lm.slice(0, 2), ply.lm.slice(2, 4)] : [];
-  const checkSquare = ply ? findCheckedKing(ply.fen) : null;
+  if (badgeInteraction.fen !== (ply?.fen || null)) {
+    Object.assign(badgeInteraction, { fen: ply?.fen || null, pinned: null, hovered: null, focused: null });
+  }
+  const position = positionBadges(ply);
+  for (const interaction of ['pinned', 'hovered', 'focused']) {
+    const key = badgeInteraction[interaction];
+    if (!key) continue;
+    const [square, kind] = key.split(':');
+    if (!state.opts[BADGE_OPT[kind]] || !position?.badges[square]?.some((b) => b.kind === kind)) {
+      badgeInteraction[interaction] = null;
+    }
+  }
+  const checkSquare = position ? position.checkedKing : ply ? findCheckedKing(ply.fen) : null;
 
   // The move's symbol sits on the square the piece landed on.
   let badge = null;
@@ -2230,6 +2312,7 @@ function renderBoard(ply, idx) {
     const f = black ? 7 - (i % 8) : i % 8;
     const name = FILES[f] + (8 - r);
     const sq = squares[i];
+    sq.dataset.square = name;
     sq.className = 'sq' + ((r + f) % 2 ? ' d' : '') +
       (lastSquares.includes(name) ? ' last' : '') + (checkSquare === name ? ' check' : '');
     const piece = grid[r]?.[f];
@@ -2241,8 +2324,15 @@ function renderBoard(ply, idx) {
     }
     if (i % 8 === 0) html += `<span class="coord rank">${8 - r}</span>`;
     if (i >= 56) html += `<span class="coord file">${FILES[f]}</span>`;
-    if (badge?.square === name) html += `<span class="badge k-${badge.kind}" title="${KINDS[badge.kind].word}">${KINDS[badge.kind].sym}</span>`;
-    if (sq.innerHTML !== html) sq.innerHTML = html;
+    html += squareBadges(name, badge, position);
+    if (sq.innerHTML !== html) {
+      // A flip or a new annotation can replace a button without emitting focusout.
+      if (sq.contains(document.activeElement)) badgeInteraction.focused = null;
+      if (badgeInteraction.hovered && [...sq.querySelectorAll('[data-badge-kind]')].some((b) => badgeKey(b) === badgeInteraction.hovered)) {
+        badgeInteraction.hovered = null;
+      }
+      sq.innerHTML = html;
+    }
   }
 }
 
@@ -2676,6 +2766,47 @@ function initPanels() {
 
 // ---------- wiring ----------
 
+function badgeKey(button) {
+  return `${button.dataset.badgeSquare}:${button.dataset.badgeKind}`;
+}
+
+el.board.addEventListener('pointerover', (e) => {
+  if (e.pointerType !== 'mouse') return;
+  const button = e.target.closest('[data-badge-kind]');
+  if (!button || badgeInteraction.hovered === badgeKey(button)) return;
+  badgeInteraction.hovered = badgeKey(button);
+  refreshBadgeExplanation();
+});
+el.board.addEventListener('pointerout', (e) => {
+  const button = e.target.closest('[data-badge-kind]');
+  if (!button || button.contains(e.relatedTarget) || !badgeInteraction.hovered) return;
+  badgeInteraction.hovered = null;
+  refreshBadgeExplanation();
+});
+el.board.addEventListener('focusin', (e) => {
+  const button = e.target.closest('[data-badge-kind]');
+  if (!button || !button.matches(':focus-visible')) return;
+  badgeInteraction.focused = badgeKey(button);
+  refreshBadgeExplanation();
+});
+el.board.addEventListener('focusout', () => {
+  if (!badgeInteraction.focused) return;
+  badgeInteraction.focused = null;
+  refreshBadgeExplanation();
+});
+el.board.addEventListener('click', (e) => {
+  const button = e.target.closest('[data-badge-kind]');
+  if (!button) return;
+  const key = badgeKey(button);
+  badgeInteraction.pinned = badgeInteraction.pinned === key ? null : key;
+  refreshBadgeExplanation();
+});
+document.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('[data-badge-kind]') || !badgeInteraction.pinned) return;
+  Object.assign(badgeInteraction, { pinned: null, hovered: null, focused: null });
+  refreshBadgeExplanation();
+});
+
 function updateThemeToggle() {
   const theme = document.documentElement.dataset.theme;
   const isDark = theme === 'dark' || (!theme && matchMedia('(prefers-color-scheme: dark)').matches);
@@ -2741,6 +2872,11 @@ el.settings.addEventListener('change', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    Object.assign(badgeInteraction, { pinned: null, hovered: null, focused: null });
+    refreshBadgeExplanation();
+    return;
+  }
   if (e.target.closest('input, select')) return;
   const keys = {
     ArrowLeft: () => $('prev').click(),

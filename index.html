@@ -41,21 +41,22 @@
         <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
         <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
         <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
-        <button id="tacticsToggle" title="Show tactics on the board: hanging pieces, winning trades, checks, mate… (T). Pick which ones in Analysis settings.">Tactics</button>
+        <button id="tacticsToggle" title="Show position badges and tactical moves on the board (T). Pick which ones in Analysis settings.">Tactics</button>
         <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
       </div>
       <div id="legend" class="legend" hidden>
+        <span data-kind="undefended"><i class="key badge-key t-undefended"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v6c0 5-8 9-8 9s-8-4-8-9V6Z" fill="currentColor"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="var(--tactic-badge-color)" stroke-width="2" stroke-linecap="round"/></svg></i>Vulnerable piece</span>
+        <span data-kind="pinned"><i class="key badge-key t-pinned"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v3h-2v5l3 3v2h-5v5h-2v-5H6v-2l3-3V6H7Z" fill="currentColor"/></svg></i>Pinned piece</span>
+        <span data-kind="checkable"><i class="key badge-key t-checkable"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"/></svg></i>Checkable king</span>
+        <span data-kind="mateStatus"><i class="key badge-key t-mate">#</i>Checkmate</span>
         <span data-kind="mate"><i class="key mate"></i>Mate in one or two</span>
         <span data-kind="fork"><i class="key fork"></i>Fork</span>
-        <span data-kind="pin"><i class="key pin"></i>Pin</span>
+        <span data-kind="pin"><i class="key pin"></i>Moves creating pins</span>
         <span data-kind="skewer"><i class="key skewer"></i>Skewer</span>
         <span data-kind="discovered"><i class="key discovered"></i>Discovered attack</span>
         <span data-kind="removal"><i class="key removal"></i>Removal of the defender</span>
         <span data-kind="zwischen"><i class="key zwischen"></i>Zwischenzug</span>
-        <span data-kind="hanging"><i class="key hanging"></i>Hanging piece</span>
-        <span data-kind="trade"><i class="key trade"></i>Winning trade</span>
-        <span data-kind="pressure"><i class="key pressure"></i>Attackers vs defenders</span>
-        <span data-kind="check"><i class="key check"></i>Check</span>
+        <span data-kind="pressure"><i class="key pressure"></i>Moves adding winning pressure</span>
         <span data-kind="queen"><i class="key queen"></i>Attacks the queen</span>
         <span data-kind="capture"><i class="key capture"></i>Capture</span>
         <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
@@ -92,17 +93,20 @@
       <label><input type="checkbox" data-opt="worst"> Blunder previews</label>
       <label><input type="checkbox" data-opt="tactics" data-noengine> Tactics on the board <span class="hint">(T)</span></label>
       <div id="tacticOpts" class="subopts">
+        <p class="tactic-group">Position badges</p>
+        <label><input type="checkbox" data-opt="tUndefended" data-noengine> Show undefended pieces</label>
+        <label><input type="checkbox" data-opt="tPinned" data-noengine> Show pinned pieces</label>
+        <label><input type="checkbox" data-opt="tCheckable" data-noengine> Show checkable king</label>
+        <p class="tactic-hint">Hover, focus, or tap a badge to explain it.</p>
+        <p class="tactic-group">Tactical moves</p>
         <label><input type="checkbox" data-opt="tMate" data-noengine> Mate in one or two</label>
         <label><input type="checkbox" data-opt="tFork" data-noengine> Forks</label>
-        <label><input type="checkbox" data-opt="tPin" data-noengine> Pins</label>
+        <label><input type="checkbox" data-opt="tPin" data-noengine> Moves creating pins</label>
         <label><input type="checkbox" data-opt="tSkewer" data-noengine> Skewers</label>
         <label><input type="checkbox" data-opt="tDiscovered" data-noengine> Discovered attacks</label>
         <label><input type="checkbox" data-opt="tRemoval" data-noengine> Removal of the defender</label>
         <label><input type="checkbox" data-opt="tZwischen"> Zwischenzug <span class="hint">(needs the engine)</span></label>
-        <label><input type="checkbox" data-opt="tHanging" data-noengine> Hanging pieces</label>
-        <label><input type="checkbox" data-opt="tTrade" data-noengine> Winning trades</label>
-        <label><input type="checkbox" data-opt="tPressure" data-noengine> Attackers vs defenders (e.g. 2v2)</label>
-        <label><input type="checkbox" data-opt="tCheck" data-noengine> Checks</label>
+        <label><input type="checkbox" data-opt="tPressure" data-noengine> Moves adding winning pressure</label>
         <label><input type="checkbox" data-opt="tQueen" data-noengine> Attacks on the queen</label>
         <label><input type="checkbox" data-opt="tCapture" data-noengine> All other captures</label>
         <label><input type="checkbox" data-opt="threats" data-noengine> Opponent's threats too (dashed)</label>
@@ -134,6 +138,7 @@
 <footer class="foot">Games stream from the <a href="https://lichess.org/api" target="_blank" rel="noopener">Lichess public API</a>.</footer>
 
 <script src="libs/chess.min.js"></script>
+<script src="tactic-badges.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
