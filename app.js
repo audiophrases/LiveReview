@@ -1102,19 +1102,20 @@ function bestCaptureOn(g, sq, color) {
   return best;
 }
 
-// Each detector returns what to draw with the move for that tactic, { lines: [{ from, to, dash, label }], label },
+// Each detector returns what to draw with the move for that tactic, { lines: [{ from, to, dash }] },
 // or null when the move isn't that tactic. `after` is the board once m is played.
 
+// A fork: the moved piece attacks two or more targets at once, the king or any piece it would profit
+// from capturing (a trade that comes out ahead once the recaptures are played out).
 function detectFork(after, m, me) {
-  if (pieceAtRisk(after, m.to) > 0) return null;
   const targets = [];
   for (const sq of attacksFrom(after, m.to)) {
     const p = cellAt(after, sq);
     if (!p || colorOf(p) === me) continue;
-    if (typeOf(p) === 'k' || captureGain(after, m.to, sq) >= 2) targets.push(sq);
+    if (typeOf(p) === 'k' || (SEE_VALUE[typeOf(p)] >= 3 && captureGain(after, m.to, sq) > 0)) targets.push(sq);
   }
   if (targets.length < 2) return null;
-  return { lines: targets.map((sq) => ({ from: m.to, to: sq })), label: 'Fork' };
+  return { lines: targets.map((sq) => ({ from: m.to, to: sq })) };
 }
 
 // Pins and skewers made by the moved bishop, rook or queen: { pin, skewer }.
@@ -1138,9 +1139,9 @@ function detectLine(after, m, me) {
     const vB = SEE_VALUE[typeOf(B)];
     const winnable = (sq, v) => v > vMover || !attackersOf(after, sq, them).length;
     if (vA < vB && vA >= 3 && (typeOf(B) === 'k' || winnable(b, vB))) {
-      found.pin ||= { lines: [{ from: m.to, to: b }], label: typeOf(B) === 'k' ? 'Pin+' : 'Pin' };
+      found.pin ||= { lines: [{ from: m.to, to: b }] };
     } else if (vA > vB && vB >= 3 && (typeOf(A) === 'k' || winnable(a, vA)) && winnable(b, vB)) {
-      found.skewer ||= { lines: [{ from: m.to, to: b }], label: 'Skewer' };
+      found.skewer ||= { lines: [{ from: m.to, to: b }] };
     }
   }
   return found;
@@ -1160,7 +1161,7 @@ function detectDiscovered(after, m, me) {
     if (colorOf(T) === me) continue;
     const check = typeOf(T) === 'k';
     if (check || captureGain(after, behind, target) >= 2) {
-      return { lines: [{ from: behind, to: target }], label: check ? 'Disc+' : 'Disc' };
+      return { lines: [{ from: behind, to: target }] };
     }
   }
   return null;
@@ -1182,12 +1183,12 @@ function detectPressure(grid, after, m, me) {
       value: SEE_VALUE[typeOf(p)],
       target: sq,
       lines: [
-        ...attackers.map((a) => ({ from: a, to: sq, label: a === m.to ? `${attackers.length}v${defenders.length}` : null })),
+        ...attackers.map((a) => ({ from: a, to: sq })),
         ...defenders.map((d) => ({ from: d, to: sq, dash: true })),
       ],
     };
   }
-  return best && { lines: best.lines, label: null, target: best.target };
+  return best && { lines: best.lines, target: best.target };
 }
 
 // Capturing a piece that guarded another, which can then be won.
@@ -1198,7 +1199,7 @@ function detectRemoval(grid, after, m, me) {
     if (!T || colorOf(T) === me || typeOf(T) === 'k' || SEE_VALUE[typeOf(T)] < 3) continue;
     if (bestCaptureOn(grid, sq, me).gain >= 2) continue;  // already winnable: nothing needed removing
     const next = bestCaptureOn(after, sq, me);
-    if (next.gain >= 2) return { lines: [{ from: next.from, to: sq, dash: true }], label: 'Removal' };
+    if (next.gain >= 2) return { lines: [{ from: next.from, to: sq, dash: true }] };
   }
   return null;
 }
@@ -1668,11 +1669,11 @@ function drawArrows(ply, engineArrows) {
       for (const t of tactics(fen)) {
         const color = TACTIC_COLOR[t.kind];
         const opacity = dash ? 0.55 : 0.85;
-        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash, label: t.extra?.label });
+        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash });
         // The idea behind the move: fork targets, the pinned line, the unmasked attacker, the defenders...
         for (const x of t.extra?.lines || []) {
           if (x.from === x.to) continue;
-          list.push({ from: x.from, to: x.to, color, width: 0.055, opacity: opacity * 0.85, dash: dash || x.dash, label: x.label });
+          list.push({ from: x.from, to: x.to, color, width: 0.055, opacity: opacity * 0.85, dash: dash || x.dash });
         }
       }
     };
@@ -1683,7 +1684,7 @@ function drawArrows(ply, engineArrows) {
       const z = zwischenzug(currentIndex());
       if (z) {
         const color = TACTIC_COLOR.zwischen;
-        list.push({ from: z.from, to: z.to, color, width: 0.11, opacity: 0.9, label: 'Zw' });
+        list.push({ from: z.from, to: z.to, color, width: 0.11, opacity: 0.9 });
         list.push({ from: z.later.slice(0, 2), to: z.later.slice(2, 4), color, width: 0.055, opacity: 0.75, dash: true });
       }
     }
