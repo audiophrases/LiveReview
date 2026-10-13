@@ -12,9 +12,10 @@
   --clock-run: #2f6f4f;
   --clock-run-text: #fff;
   --low: #b3361f;
+  color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #1a1917;
     --panel: #24221f;
     --text: #ebe6de;
@@ -23,7 +24,19 @@
     --accent: #6cbf8c;
     --clock: #312e2a;
     --clock-run: #3f8f64;
+    color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #1a1917;
+  --panel: #24221f;
+  --text: #ebe6de;
+  --muted: #a39c91;
+  --line: #3a3732;
+  --accent: #6cbf8c;
+  --clock: #312e2a;
+  --clock-run: #3f8f64;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -57,7 +70,7 @@ a { color: var(--accent); }
   border-radius: 6px;
   background: var(--bg);
 }
-.pick button, .pickfolder, .controls button, .controls a {
+.pick button, .pickfolder, .theme-toggle, .controls button, .controls a {
   padding: 5px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;

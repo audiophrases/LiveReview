@@ -23,6 +23,7 @@ const SWEEP_LINES = 2;
 const ANALYSABLE = ['standard', 'fromPosition', 'chess960'];
 
 const FOLDER_POLL_MS = 200;
+const THEME_KEY = 'livewatch.theme';
 
 const KINDS = {
   brilliant: { sym: '!!', word: 'Brilliant' },
@@ -39,7 +40,7 @@ const el = {
   board: $('board'), barTop: $('barTop'), barBottom: $('barBottom'),
   status: $('status'), meta: $('meta'), moves: $('moves'), open: $('open'),
   live: $('live'), flip: $('flip'), sound: $('sound'),
-  userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'),
+  userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'), themeToggle: $('themeToggle'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
   altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'), legend: $('legend'), worst: $('worst'), worstTitle: $('worstTitle'), tally: $('tally'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
@@ -2674,6 +2675,23 @@ function initPanels() {
 }
 
 // ---------- wiring ----------
+
+function updateThemeToggle() {
+  const theme = document.documentElement.dataset.theme;
+  const isDark = theme === 'dark' || (!theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  el.themeToggle.textContent = `Switch to ${isDark ? 'light' : 'dark'} mode`;
+}
+updateThemeToggle();
+el.themeToggle.onclick = () => {
+  const theme = document.documentElement.dataset.theme;
+  const isDark = theme === 'dark' || (!theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = isDark ? 'light' : 'dark';
+  try { localStorage.setItem(THEME_KEY, document.documentElement.dataset.theme); } catch { /* optional */ }
+  updateThemeToggle();
+};
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (!document.documentElement.dataset.theme) updateThemeToggle();
+});
 
 el.userForm.addEventListener('submit', (e) => {
   e.preventDefault();

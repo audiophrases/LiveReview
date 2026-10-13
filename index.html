@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Live Watch</title>
 <link rel="icon" href="pieces/white-knight.png">
+<script>try { const theme = localStorage.getItem('livewatch.theme'); if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme; } catch {}</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,6 +16,7 @@
     <button>Watch</button>
   </form>
   <button id="folderBtn" class="pickfolder" type="button" title="Review a game live from the newest .jsonl file in a folder">Watch folder…</button>
+  <button id="themeToggle" class="theme-toggle" type="button">Switch to dark mode</button>
 </header>
 
 <main class="layout">
