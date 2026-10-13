@@ -369,6 +369,7 @@ a { color: var(--accent); }
 .legend .key.check { background: #d6352b; }
 .legend.simple .full, .legend:not(.simple) .easy { display: none; }
 .legend .key.trade { background: #2e9d57; }
+.legend .key.motif { background: #a24bd1; }
 .legend .key.queen { background: #a24bd1; }
 .legend .key.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 8px); }
 

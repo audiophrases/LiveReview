@@ -929,45 +929,566 @@ function tactics(fen) {
   return result;
 }
 
-// The few tactics worth a glance, chess.com style: mate in one, pieces left hanging
-// and captures that win material even though the target is defended.
-// [{ from, to, kind }], kind being 'mate', 'hanging' or 'trade'; best first, at most SIMPLE_MAX.
-const SIMPLE_MAX = 3;
-const SIMPLE_RANK = { trade: 1, hanging: 2, mate: 3 };
-const simpleCache = new Map();
-function simpleTactics(fen) {
-  if (simpleCache.has(fen)) return simpleCache.get(fen);
-  const found = [];
+// ---------- key tactics ----------
+// The few tactics worth a glance, chess.com style. They're found without the engine,
+// quickly enough to keep up with a fast live game: a small material search tries each
+// move, every reply to it, then captures until the exchanges settle, and keeps the
+// moves that win at least KEY_GAIN or mate. Each is then named by what it does.
+// [{ from, to, kind, label, targets }], kind being 'mate', 'hanging', 'trade' or a motif
+// ('fork', 'pin', 'skewer', 'discovered', 'win'); best first, at most KEY_MAX.
+const KEY_GAIN = 2;
+const KEY_MAX = 3;
+const MATE = 1000;
+const Q_DEPTH = 8;            // plies of captures, enough to settle an exchange on one square
+const NODE_BUDGET = 40000;    // per pass, so a wild position can't stall the board
+const OUT_OF_NODES = {};
+const LINES = [1, 16, 15, 17];   // 0x88 steps along a rank, a file and the two diagonals
+const STEPS = { n: [33, 31, 18, 14, -14, -18, -31, -33], k: [1, 15, 16, 17, -1, -15, -16, -17] };
+const RAYS = { b: [15, 17, -15, -17], r: [1, 16, -1, -16], q: [1, 15, 16, 17, -1, -15, -16, -17] };
+const MOTIF_LABEL = { fork: 'Fork', pin: 'Pin', skewer: 'Skewer', discovered: 'Discovered' };
+const TYPE = {};
+for (const t of 'pnbrqk') TYPE[t] = TYPE[t.toUpperCase()] = t;
+const keyCache = new Map();
+let keyNodes = 0;
+
+const sqIndex = (sq) => (+sq[1] - 1) * 16 + sq.charCodeAt(0) - 97;
+const sqName = (s) => FILES[s & 7] + ((s >> 4) + 1);
+const sideOf = (p) => (p < 'a' ? 'w' : 'b');
+const otherSide = (c) => (c === 'w' ? 'b' : 'w');
+const own = (pos) => (pos.side === 'w' ? pos.mat : -pos.mat);
+const slides = (type, d) => type === 'q' || type === (Math.abs(d) === 1 || Math.abs(d) === 16 ? 'r' : 'b');
+
+function keyTactics(fen) {
+  if (keyCache.has(fen)) return keyCache.get(fen);
+  const result = [];
   if (chess.load(fen)) {
-    const me = chess.turn();
-    const grid = fenGrid(fen);
-    for (const m of chess.moves({ verbose: true })) {
-      let kind = m.san.endsWith('#') ? 'mate' : null;
-      let gain = 100;
-      if (!kind && m.captured && !m.flags.includes('e')) {
-        const target = VALUE[m.captured];
-        const attacker = VALUE[m.piece];
-        if (target >= 3) {
-          if (!attackersOf(grid, m.to, me === 'w' ? 'b' : 'w').length) { kind = 'hanging'; gain = target; }
-          else if (target - attacker >= 2) { kind = 'trade'; gain = target - attacker; }
-        }
+    const roots = chess.moves({ verbose: true });
+    const inCheck = chess.in_check();
+    const pos = keyBoard(fen);
+    const us = pos.side;
+    const base = own(pos);
+    const winners = [];
+    let free = 0;
+    keyNodes = 0;
+    try {
+      // What we win whatever we play: threats the opponent can't parry even with a free
+      // move. A quiet move only counts if it wins more than that.
+      if (!inCheck) {
+        const ep = pos.ep;
+        pos.side = otherSide(us);
+        pos.ep = -1;
+        free = Math.max(0, -bestReply(pos, -MATE, MATE) - base);
+        pos.side = us;
+        pos.ep = ep;
       }
-      if (!kind) continue;
-      // Of several pieces that can take the same target, the cheapest one makes the arrow.
-      const old = found.find((f) => f.to === m.to && f.kind === kind);
-      const cost = VALUE[m.piece];
-      if (old) {
-        if (cost < old.cost) Object.assign(old, { from: m.from, cost });
-      } else if (!found.some((f) => f.from === m.from && f.to === m.to)) {
-        found.push({ from: m.from, to: m.to, kind, gain, cost });
+      for (const rm of roots) {
+        if (rm.promotion && rm.promotion !== 'q') continue;
+        const m = { from: sqIndex(rm.from), to: sqIndex(rm.to), promo: rm.promotion, ep: rm.flags.includes('e') };
+        if (rm.san.endsWith('#')) {
+          winners.push({ rm, m, gain: MATE });
+          continue;
+        }
+        const need = base + KEY_GAIN + (rm.captured ? 0 : free);
+        const u = makeMove(pos, m);
+        const score = -bestReply(pos, -MATE, 1 - need);
+        unmakeMove(pos, u);
+        if (score >= need) winners.push({ rm, m, gain: score - base });
+      }
+    } catch (err) {
+      if (err !== OUT_OF_NODES) throw err;   // out of time: keep what was found
+    }
+
+    // Name the best few: the move that wins most, then the cheapest piece; one arrow per
+    // target square and kind. Captures that win on the spot are named first, since a
+    // fancier move that only wins the same piece (an in-between check, say) adds nothing.
+    winners.sort((a, b) => b.gain - a.gain || VALUE[a.rm.piece] - VALUE[b.rm.piece]);
+    const direct = new Map();   // square taken -> what taking it wins
+    for (const w of winners) {
+      if (!w.rm.captured || w.gain >= MATE / 2) continue;
+      const u = makeMove(pos, w.m);
+      w.kind = onTheSpot(pos, w.m, w.rm);
+      unmakeMove(pos, u);
+      if (w.kind && !direct.has(w.m.to)) direct.set(w.m.to, w.gain);
+    }
+    keyNodes = 0;
+    try {
+      for (const w of winners) {
+        if (result.length === KEY_MAX) break;
+        let t = { kind: w.kind, label: null, targets: [] };
+        if (w.gain >= MATE / 2) {
+          t = { kind: 'mate', label: w.rm.san.endsWith('#') ? null : 'Mate', targets: [] };
+        } else if (!w.kind) {
+          if (w.rm.captured && w.gain - free < KEY_GAIN) continue;   // only cashes in what was already won
+          const u = makeMove(pos, w.m);
+          t = motif(pos, w.m);
+          unmakeMove(pos, u);
+          // A capture that wins only as the end of an exchange is just the exchange going on.
+          if (w.rm.captured && t.kind === 'win') continue;
+          const same = t.won >= 0 ? direct.get(t.won) : Math.max(-1, ...direct.values());
+          if (same !== undefined && same >= w.gain - 1) continue;
+          t.label = t.kind === 'win' ? `+${w.gain}` : MOTIF_LABEL[t.kind];
+        }
+        if (result.some((r) => r.to === w.rm.to && r.kind === t.kind)) continue;
+        result.push({ from: w.rm.from, to: w.rm.to, kind: t.kind, label: t.label, targets: t.targets.map(sqName) });
+      }
+    } catch (err) {
+      if (err !== OUT_OF_NODES) throw err;
+    }
+  }
+  if (keyCache.size > 2000) keyCache.clear();
+  keyCache.set(fen, result);
+  return result;
+}
+
+// A capture that wins at least KEY_GAIN on the spot, judged right after it: 'hanging'
+// if nothing can take back, 'trade' if what it took is worth that much more; else null.
+function onTheSpot(pos, m, rm) {
+  const back = canTakeOn(pos, m.to);
+  if (VALUE[rm.captured] - (back ? VALUE[TYPE[pos.b[m.to]]] : 0) < KEY_GAIN) return null;
+  return back ? 'trade' : 'hanging';
+}
+
+// How a winning move wins, judged on the board right after it (the opponent to move):
+// { kind, targets, won }, `won` being the square of what the line ends up taking (-1 if
+// unclear). The motif is named after how that piece falls.
+function motif(pos, m) {
+  const { b } = pos;
+  const them = pos.side;
+  const us = otherSide(them);
+  const take = principal(pos);
+  // Only a piece already standing there counts (or the opponent's piece that took ours
+  // on the mover's square); a piece that only arrives with the reply muddles the picture.
+  const won = take && (take.to === m.to || (b[take.to] && sideOf(b[take.to]) === them)) ? take.to : -1;
+  const wonList = won >= 0 ? [won] : [];
+
+  // Discovered check: one of our line pieces now sees the king through the square the mover left.
+  const king = pos.king[them];
+  const kd = lineDir(king, m.from);
+  const s = kd ? firstOnLine(b, king, kd) : -1;
+  if (s >= 0 && s !== m.to && sideOf(b[s]) === us && slides(TYPE[b[s]], kd) && between(king, s, m.from)) {
+    return { kind: 'discovered', targets: [king, ...wonList.filter((x) => x !== king)], won };
+  }
+
+  // Enemy pieces worth hitting: the king, anything worth more than the attacker, and
+  // anything with no defender but the other pieces under attack.
+  const mover = TYPE[b[m.to]];
+  const attacked = attacksFrom(b, m.to).filter((sq) => b[sq] && sideOf(b[sq]) === them);
+  const hits = attacked.filter((sq) => TYPE[b[sq]] === 'k' || VALUE[TYPE[b[sq]]] > VALUE[mover] ||
+    attackersOn(b, sq, them).every((d) => attacked.includes(d)));
+  // A fork wins one of the pieces it hits, or makes the opponent give something up for
+  // the forking piece, which we then retake on its square.
+  if (hits.length >= 2 && (hits.includes(won) || won === m.to)) return { kind: 'fork', targets: hits, won };
+  if (take && take.from === m.to) {
+    // Along the mover's lines: a big piece (or the king) forced aside from what's behind it
+    // is a skewer; a piece that can't move, or exposes something bigger if it does, is pinned.
+    for (const dir of RAYS[mover] || []) {
+      const front = firstOnLine(b, m.to, dir);
+      if (front < 0 || sideOf(b[front]) !== them) continue;
+      const back = firstOnLine(b, front, dir);
+      if (back < 0 || sideOf(b[back]) !== them || (won !== front && won !== back)) continue;
+      const f = TYPE[b[front]];
+      const k = TYPE[b[back]];
+      if (won === back && (f === 'k' || VALUE[f] > VALUE[k])) return { kind: 'skewer', targets: [front, back], won };
+      if (k === 'k' || VALUE[k] > VALUE[f]) return { kind: 'pin', targets: [front, back], won };
+    }
+  } else if (take && won >= 0 && between(take.from, won, m.from)) {
+    return { kind: 'discovered', targets: [won, ...hits.filter((x) => x !== won)], won };
+  }
+  // Piling up on a piece that's already pinned.
+  const to = won >= 0 ? pinnedTo(b, won, us) : -1;
+  if (to >= 0) return { kind: 'pin', targets: [won, to], won };
+  return { kind: 'win', targets: wonList, won };
+}
+
+// The line behind a winning move, the opponent to move: their best reply, then the
+// capture we answer it with (null if we'd rather not capture).
+function principal(pos) {
+  let reply = null;
+  let best = -Infinity;
+  for (const m of genMoves(pos, false)) {
+    const u = makeMove(pos, m);
+    if (leavesKingSafe(pos, u)) {
+      const score = -quiesce(pos, -MATE, -best, Q_DEPTH, true);
+      if (score > best) {
+        best = score;
+        reply = m;
+      }
+    }
+    unmakeMove(pos, u);
+  }
+  if (!reply) return null;
+  const u = makeMove(pos, reply);
+  const check = isAttacked(pos.b, pos.king[pos.side], u.side);
+  let top = check ? -Infinity : standPat(pos);
+  let take = null;
+  for (const m of genMoves(pos, !check)) {
+    const v = makeMove(pos, m);
+    if (leavesKingSafe(pos, v)) {
+      const score = -quiesce(pos, -MATE, -top, Q_DEPTH - 1, false);
+      if (score > top) {
+        top = score;
+        take = v.captured ? m : null;
+      }
+    }
+    unmakeMove(pos, v);
+  }
+  unmakeMove(pos, u);
+  return take;
+}
+
+// The step from a toward c along a rank, file or diagonal, or 0 if they don't line up.
+function lineDir(a, c) {
+  const df = (c & 7) - (a & 7);
+  const dr = (c >> 4) - (a >> 4);
+  if (!df && !dr) return 0;
+  if (!dr) return Math.sign(df);
+  if (!df) return 16 * Math.sign(dr);
+  return Math.abs(df) === Math.abs(dr) ? 16 * Math.sign(dr) + Math.sign(df) : 0;
+}
+
+// Is x strictly between a and c on a line?
+function between(a, c, x) {
+  const d = lineDir(a, c);
+  if (!d) return false;
+  for (let t = a + d; t !== c && !(t & 0x88); t += d) if (t === x) return true;
+  return false;
+}
+
+// A 0x88 board (index = rank * 16 + file), with material counted White minus Black.
+function keyBoard(fen) {
+  const [placement, side, , ep] = fen.split(' ');
+  const pos = { b: new Array(128).fill(null), side, ep: ep && ep !== '-' ? sqIndex(ep) : -1, king: {}, mat: 0 };
+  placement.split('/').forEach((row, i) => {
+    let f = 0;
+    for (const ch of row) {
+      if (ch >= '1' && ch <= '8') {
+        f += +ch;
+        continue;
+      }
+      const s = (7 - i) * 16 + f++;
+      pos.b[s] = ch;
+      if (TYPE[ch] === 'k') pos.king[sideOf(ch)] = s;
+      pos.mat += (ch < 'a' ? 1 : -1) * VALUE[TYPE[ch]];
+    }
+  });
+  return pos;
+}
+
+// Is square s attacked by `by`'s pieces?
+function isAttacked(b, s, by) {
+  const w = by === 'w';
+  const pawn = w ? 'P' : 'p';
+  const back = w ? -16 : 16;   // pawns take forwards, so look one rank behind
+  if (!((s + back - 1) & 0x88) && b[s + back - 1] === pawn) return true;
+  if (!((s + back + 1) & 0x88) && b[s + back + 1] === pawn) return true;
+  const knight = w ? 'N' : 'n';
+  for (const d of STEPS.n) if (!((s + d) & 0x88) && b[s + d] === knight) return true;
+  const king = w ? 'K' : 'k';
+  for (const d of STEPS.k) if (!((s + d) & 0x88) && b[s + d] === king) return true;
+  const queen = w ? 'Q' : 'q';
+  for (const d of RAYS.q) {
+    const line = slides('r', d) ? (w ? 'R' : 'r') : (w ? 'B' : 'b');
+    for (let t = s + d; !(t & 0x88); t += d) {
+      const p = b[t];
+      if (!p) continue;
+      if (p === queen || p === line) return true;
+      break;
+    }
+  }
+  return false;
+}
+
+// Squares of `by`'s pieces that attack square s.
+function attackersOn(b, s, by) {
+  const out = [];
+  const w = by === 'w';
+  const back = w ? -16 : 16;
+  for (const t of [s + back - 1, s + back + 1]) if (!(t & 0x88) && b[t] === (w ? 'P' : 'p')) out.push(t);
+  for (const type of ['n', 'k']) {
+    for (const d of STEPS[type]) if (!((s + d) & 0x88) && b[s + d] === (w ? type.toUpperCase() : type)) out.push(s + d);
+  }
+  for (const d of RAYS.q) {
+    const t = firstOnLine(b, s, d);
+    if (t >= 0 && sideOf(b[t]) === by && slides(TYPE[b[t]], d)) out.push(t);
+  }
+  return out;
+}
+
+// Squares the piece on s attacks.
+function attacksFrom(b, s) {
+  const p = b[s];
+  const type = TYPE[p];
+  const out = [];
+  if (type === 'p') {
+    const ahead = s + (p < 'a' ? 16 : -16);
+    for (const t of [ahead - 1, ahead + 1]) if (!(t & 0x88)) out.push(t);
+  } else if (STEPS[type]) {
+    for (const d of STEPS[type]) if (!((s + d) & 0x88)) out.push(s + d);
+  } else {
+    for (const d of RAYS[type]) {
+      for (let t = s + d; !(t & 0x88); t += d) {
+        out.push(t);
+        if (b[t]) break;
       }
     }
   }
-  found.sort((a, b) => SIMPLE_RANK[b.kind] - SIMPLE_RANK[a.kind] || b.gain - a.gain);
-  const result = found.slice(0, SIMPLE_MAX).map(({ from, to, kind }) => ({ from, to, kind }));
-  if (simpleCache.size > 2000) simpleCache.clear();
-  simpleCache.set(fen, result);
-  return result;
+  return out;
+}
+
+function firstOnLine(b, s, d) {
+  for (let t = s + d; !(t & 0x88); t += d) if (b[t]) return t;
+  return -1;
+}
+
+// What the enemy piece on s is pinned to by one of our line pieces (its square), or -1.
+function pinnedTo(b, s, us) {
+  for (const d of LINES) {
+    for (const dir of [d, -d]) {
+      const pinner = firstOnLine(b, s, dir);
+      const behind = firstOnLine(b, s, -dir);
+      if (pinner < 0 || behind < 0 || sideOf(b[pinner]) !== us || sideOf(b[behind]) === us) continue;
+      if (!slides(TYPE[b[pinner]], dir)) continue;
+      const k = TYPE[b[behind]];
+      if (k === 'k' || VALUE[k] > VALUE[TYPE[b[s]]]) return behind;
+    }
+  }
+  return -1;
+}
+
+// Pseudo-legal moves for the side to move, captures first (the most valuable victim,
+// then the cheapest attacker); with `loud`, only captures and promotions. No castling:
+// the search below the first move does without it.
+function genMoves(pos, loud) {
+  const { b } = pos;
+  const w = pos.side === 'w';
+  const out = [];
+  const push = (from, to, promo, ep) => {
+    const victim = ep ? 1 : b[to] ? VALUE[TYPE[b[to]]] : 0;
+    out.push({ from, to, promo, ep, victim, order: victim ? victim * 16 - VALUE[TYPE[b[from]]] : promo ? 8 : -1 });
+  };
+  for (let s = 0; s < 120; s++) {
+    if (s & 0x88) {
+      s += 7;
+      continue;
+    }
+    const p = b[s];
+    if (!p || (p < 'a') !== w) continue;
+    const type = TYPE[p];
+    if (type === 'p') {
+      const d = w ? 16 : -16;
+      const last = w ? 7 : 0;
+      const one = s + d;
+      if (!(one & 0x88) && !b[one]) {
+        if (one >> 4 === last) push(s, one, 'q');
+        else if (!loud) {
+          push(s, one);
+          if (s >> 4 === (w ? 1 : 6) && !b[one + d]) push(s, one + d);
+        }
+      }
+      for (const to of [one - 1, one + 1]) {
+        if (to & 0x88) continue;
+        if (b[to] && (b[to] < 'a') !== w) push(s, to, to >> 4 === last ? 'q' : undefined);
+        else if (to === pos.ep) push(s, to, undefined, true);
+      }
+    } else if (STEPS[type]) {
+      for (const d of STEPS[type]) {
+        const to = s + d;
+        if (to & 0x88) continue;
+        const q = b[to];
+        if (q ? (q < 'a') !== w : !loud) push(s, to);
+      }
+    } else {
+      for (const d of RAYS[type]) {
+        for (let to = s + d; !(to & 0x88); to += d) {
+          const q = b[to];
+          if (!q) {
+            if (!loud) push(s, to);
+            continue;
+          }
+          if ((q < 'a') !== w) push(s, to);
+          break;
+        }
+      }
+    }
+  }
+  return out.sort((x, y) => y.order - x.order);
+}
+
+function makeMove(pos, m) {
+  const { b } = pos;
+  const piece = b[m.from];
+  const w = piece < 'a';
+  const capSq = m.ep ? m.to + (w ? -16 : 16) : m.to;
+  const u = { m, piece, captured: b[capSq], capSq, ep: pos.ep, mat: pos.mat, side: pos.side, rook: null };
+  if (u.captured) pos.mat += (w ? 1 : -1) * VALUE[TYPE[u.captured]];
+  if (m.promo) pos.mat += (w ? 1 : -1) * (VALUE[m.promo] - 1);
+  b[capSq] = null;
+  b[m.from] = null;
+  b[m.to] = m.promo ? (w ? m.promo.toUpperCase() : m.promo) : piece;
+  if (TYPE[piece] === 'k') {
+    pos.king[u.side] = m.to;
+    if (Math.abs(m.to - m.from) === 2) {   // castling, which only the first move can be
+      u.rook = m.to > m.from ? [m.from + 3, m.from + 1] : [m.from - 4, m.from - 1];
+      b[u.rook[1]] = b[u.rook[0]];
+      b[u.rook[0]] = null;
+    }
+  }
+  pos.ep = TYPE[piece] === 'p' && Math.abs(m.to - m.from) === 32 ? (m.from + m.to) / 2 : -1;
+  pos.side = w ? 'b' : 'w';
+  return u;
+}
+
+function unmakeMove(pos, u) {
+  const { b } = pos;
+  const { m } = u;
+  if (u.rook) {
+    b[u.rook[0]] = b[u.rook[1]];
+    b[u.rook[1]] = null;
+  }
+  b[m.to] = null;
+  b[u.capSq] = u.captured;
+  b[m.from] = u.piece;
+  if (TYPE[u.piece] === 'k') pos.king[u.side] = m.from;
+  pos.ep = u.ep;
+  pos.mat = u.mat;
+  pos.side = u.side;
+}
+
+const leavesKingSafe = (pos, u) => !isAttacked(pos.b, pos.king[u.side], pos.side);
+
+// Material for the side to move if it stops here. If the opponent's last move left two
+// of its pieces en prise at once (a fork of its own), only one can be saved: the smaller
+// loss counts.
+function standPat(pos) {
+  const { b } = pos;
+  const them = otherSide(pos.side);
+  let first = 0;
+  let second = 0;
+  for (let s = 0; s < 120; s++) {
+    if (s & 0x88) {
+      s += 7;
+      continue;
+    }
+    const p = b[s];
+    if (!p || sideOf(p) !== pos.side || TYPE[p] === 'k' || !isAttacked(b, s, them)) continue;
+    const g = exchange(b, s, them);
+    if (g > first) {
+      second = first;
+      first = g;
+    } else if (g > second) {
+      second = g;
+    }
+  }
+  return own(pos) - second;
+}
+
+// What `by` nets by starting captures on square s, both sides recapturing with their
+// cheapest piece while it pays (x-rays count, pins don't).
+function exchange(b, s, by) {
+  const gain = [VALUE[TYPE[b[s]]]];
+  const lifted = [];
+  let side = by;
+  let from = cheapestAttacker(b, s, side);
+  if (from < 0 || (TYPE[b[from]] === 'k' && cheapestAttacker(b, s, otherSide(side)) >= 0)) return 0;
+  for (;;) {
+    const piece = b[from];
+    lifted.push([from, piece]);
+    b[from] = null;
+    side = otherSide(side);
+    const next = cheapestAttacker(b, s, side);
+    if (next < 0 || (TYPE[b[next]] === 'k' && cheapestAttacker(b, s, otherSide(side)) >= 0)) break;
+    gain.push(VALUE[TYPE[piece]] - gain[gain.length - 1]);
+    from = next;
+  }
+  for (const [sq, p] of lifted) b[sq] = p;
+  for (let d = gain.length - 1; d > 0; d--) gain[d - 1] = -Math.max(-gain[d - 1], gain[d]);
+  return gain[0];
+}
+
+function cheapestAttacker(b, s, by) {
+  const w = by === 'w';
+  const pawn = w ? 'P' : 'p';
+  const back = w ? -16 : 16;
+  if (!((s + back - 1) & 0x88) && b[s + back - 1] === pawn) return s + back - 1;
+  if (!((s + back + 1) & 0x88) && b[s + back + 1] === pawn) return s + back + 1;
+  const knight = w ? 'N' : 'n';
+  for (const d of STEPS.n) if (!((s + d) & 0x88) && b[s + d] === knight) return s + d;
+  let best = -1;
+  for (const d of RAYS.q) {
+    const t = firstOnLine(b, s, d);
+    if (t < 0 || sideOf(b[t]) !== by) continue;
+    const type = TYPE[b[t]];
+    if (slides(type, d) && (best < 0 || VALUE[type] < VALUE[TYPE[b[best]]])) best = t;
+  }
+  if (best >= 0) return best;
+  const king = w ? 'K' : 'k';
+  for (const d of STEPS.k) if (!((s + d) & 0x88) && b[s + d] === king) return s + d;
+  return -1;
+}
+
+// Can the side to move legally take on square s?
+function canTakeOn(pos, s) {
+  for (const m of genMoves(pos, true)) {
+    if (m.to !== s) continue;
+    const u = makeMove(pos, m);
+    const ok = leavesKingSafe(pos, u);
+    unmakeMove(pos, u);
+    if (ok) return true;
+  }
+  return false;
+}
+
+// The opponent's turn after a candidate move: every legal reply, then captures.
+// Scores are material for the side to move.
+function bestReply(pos, alpha, beta) {
+  if (++keyNodes > NODE_BUDGET) throw OUT_OF_NODES;
+  let best = -MATE;
+  let moved = false;
+  for (const m of genMoves(pos, false)) {
+    const u = makeMove(pos, m);
+    if (leavesKingSafe(pos, u)) {
+      moved = true;
+      const score = -quiesce(pos, -beta, -alpha, Q_DEPTH, true);
+      if (score > best) best = score;
+      if (score > alpha) alpha = score;
+    }
+    unmakeMove(pos, u);
+    if (alpha >= beta) break;
+  }
+  if (moved) return best;
+  // Mated, or stalemated, which wins nothing beyond the material on the board.
+  return isAttacked(pos.b, pos.king[pos.side], otherSide(pos.side)) ? -MATE : own(pos);
+}
+
+// Captures until the side to move would rather stop (every move while in check).
+// `wary` is for the move right after the opponent's reply: stopping there also has to
+// reckon with whatever that reply set up to take next (a fork of its own, say).
+function quiesce(pos, alpha, beta, depth, wary) {
+  if (++keyNodes > NODE_BUDGET) throw OUT_OF_NODES;
+  const check = isAttacked(pos.b, pos.king[pos.side], otherSide(pos.side));
+  let best = -MATE;
+  if (!check) {
+    best = wary ? standPat(pos) : own(pos);
+    if (best >= beta || !depth) return best;
+    if (best > alpha) alpha = best;
+  } else if (!depth) {
+    return own(pos);
+  }
+  let moved = false;
+  for (const m of genMoves(pos, !check)) {
+    // A capture that can't lift the score past alpha even if it went unanswered isn't worth a look.
+    if (!check && best + m.victim + (m.promo ? 8 : 0) < alpha) continue;
+    const u = makeMove(pos, m);
+    if (leavesKingSafe(pos, u)) {
+      moved = true;
+      const score = -quiesce(pos, -beta, -alpha, depth - 1, false);
+      if (score > best) best = score;
+      if (score > alpha) alpha = score;
+    }
+    unmakeMove(pos, u);
+    if (alpha >= beta) break;
+  }
+  return check && !moved ? -MATE : best;
 }
 
 function fmtEval(line) {
@@ -1285,9 +1806,13 @@ function tallyHtml() {
 }
 
 const BEST_COLOR = '#2f7fd8';
-const TACTIC_COLOR = { hanging: '#e58f2a', trade: '#2e9d57', capture: '#e58f2a', queen: '#a24bd1', check: '#d6352b', mate: '#d6352b' };
+const MOTIF_COLOR = '#a24bd1';
+const TACTIC_COLOR = {
+  hanging: '#e58f2a', trade: '#2e9d57', capture: '#e58f2a', queen: MOTIF_COLOR, check: '#d6352b', mate: '#d6352b',
+  fork: MOTIF_COLOR, pin: MOTIF_COLOR, skewer: MOTIF_COLOR, discovered: MOTIF_COLOR, win: MOTIF_COLOR,
+};
 
-// Tactics underneath (the opponent's threats lowest), engine arrows on top, labels over everything.
+// Rings, then tactics (the opponent's threats lowest), engine arrows on top, labels over everything.
 function drawArrows(ply, engineArrows) {
   let svg = el.board.querySelector('svg.arrows');
   if (!svg) {
@@ -1297,11 +1822,16 @@ function drawArrows(ply, engineArrows) {
     el.board.appendChild(svg);
   }
   const list = [];
+  const rings = [];
   const variant = state.game?.info?.variant?.key || 'standard';
   if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
     const add = (fen, dash) => {
-      for (const t of (state.opts.simple ? simpleTactics(fen) : tactics(fen))) {
-        list.push({ from: t.from, to: t.to, color: TACTIC_COLOR[t.kind], width: t.kind === 'mate' ? 0.14 : 0.1, opacity: dash ? 0.55 : 0.85, dash });
+      for (const t of (state.opts.simple ? keyTactics(fen) : tactics(fen))) {
+        const color = TACTIC_COLOR[t.kind];
+        const opacity = dash ? 0.55 : 0.85;
+        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash, label: t.label });
+        // Rings on what the move hits: the forked pieces, the pinned piece and what's behind it.
+        for (const sq of t.targets || []) rings.push({ sq, color, opacity, dash });
       }
     };
     // Passing the turn is meaningless while the side to move is in check.
@@ -1310,7 +1840,13 @@ function drawArrows(ply, engineArrows) {
   }
   for (const a of engineArrows) list.push({ ...a, from: a.uci.slice(0, 2), to: a.uci.slice(2, 4) });
   const labels = [];
-  svg.innerHTML = list.map((a) => arrowSvg(a, labels)).join('') + labels.map((l) => l.svg).join('');
+  svg.innerHTML = rings.map(ringSvg).join('') + list.map((a) => arrowSvg(a, labels)).join('') + labels.map((l) => l.svg).join('');
+}
+
+function ringSvg(r) {
+  const [x, y] = squareCenter(r.sq);
+  const dash = r.dash ? ' stroke-dasharray="0.14 0.1"' : '';
+  return `<circle cx="${x}" cy="${y}" r="0.42" fill="none" stroke="${r.color}" stroke-width="0.07" opacity="${r.opacity}"${dash}/>`;
 }
 
 function arrowSvg(a, labels) {
