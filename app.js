@@ -930,12 +930,15 @@ function tactics(fen) {
 }
 
 // ---------- key tactics ----------
-// The few tactics worth a glance, chess.com style. They're found without the engine,
-// quickly enough to keep up with a fast live game: a small material search tries each
-// move, every reply to it, then captures until the exchanges settle, and keeps the
-// moves that win at least KEY_GAIN or mate. Each is then named by what it does.
-// [{ from, to, kind, label, targets }], kind being 'mate', 'hanging', 'trade' or a motif
-// ('fork', 'pin', 'skewer', 'discovered', 'win'); best first, at most KEY_MAX.
+// The tactics worth a glance, chess.com style, found by rules on the board rather than
+// the engine, so they keep up with a fast live game with or without it. A material
+// search of its own tries each move, every reply to it, then checks and captures until
+// the exchanges settle, and keeps the moves that win at least KEY_GAIN or mate (in one
+// or two). Each is then named by how the material falls.
+// [{ from, to, kind, targets, support }], kind being 'mate', 'hanging', 'trade' or a
+// motif ('fork', 'pin', 'skewer', 'discovered', 'win'); `targets` are the squares it
+// hits, `support` the [from, to] lines that make it work (the pieces guarding the square
+// it lands on, the line it uncovers or pins along). Best first, at most KEY_MAX.
 const KEY_GAIN = 2;
 const KEY_MAX = 3;
 const MATE = 1000;
@@ -945,7 +948,6 @@ const OUT_OF_NODES = {};
 const LINES = [1, 16, 15, 17];   // 0x88 steps along a rank, a file and the two diagonals
 const STEPS = { n: [33, 31, 18, 14, -14, -18, -31, -33], k: [1, 15, 16, 17, -1, -15, -16, -17] };
 const RAYS = { b: [15, 17, -15, -17], r: [1, 16, -1, -16], q: [1, 15, 16, 17, -1, -15, -16, -17] };
-const MOTIF_LABEL = { fork: 'Fork', pin: 'Pin', skewer: 'Skewer', discovered: 'Discovered' };
 const TYPE = {};
 for (const t of 'pnbrqk') TYPE[t] = TYPE[t.toUpperCase()] = t;
 const keyCache = new Map();
@@ -958,8 +960,11 @@ const otherSide = (c) => (c === 'w' ? 'b' : 'w');
 const own = (pos) => (pos.side === 'w' ? pos.mat : -pos.mat);
 const slides = (type, d) => type === 'q' || type === (Math.abs(d) === 1 || Math.abs(d) === 16 ? 'r' : 'b');
 
-function keyTactics(fen) {
-  if (keyCache.has(fen)) return keyCache.get(fen);
+// `recap` is what the last move took ({ sq, value }): taking it back is just the
+// exchange going on, not a tactic.
+function keyTactics(fen, recap = null) {
+  const key = recap ? `${fen}|${recap.sq}${recap.value}` : fen;
+  if (keyCache.has(key)) return keyCache.get(key);
   const result = [];
   if (chess.load(fen)) {
     const roots = chess.moves({ verbose: true });
@@ -988,6 +993,7 @@ function keyTactics(fen) {
           winners.push({ rm, m, gain: MATE });
           continue;
         }
+        if (free >= MATE / 2) continue;   // mate comes anyway: only the mating moves count
         const need = base + KEY_GAIN + (rm.captured ? 0 : free);
         const u = makeMove(pos, m);
         const score = -bestReply(pos, -MATE, 1 - need);
@@ -1010,41 +1016,55 @@ function keyTactics(fen) {
       unmakeMove(pos, u);
       if (w.kind && !direct.has(w.m.to)) direct.set(w.m.to, w.gain);
     }
+    // With a mate on the board, winning material is beside the point.
+    const mating = winners.length > 0 && winners[0].gain >= MATE / 2;
     keyNodes = 0;
     try {
       for (const w of winners) {
-        if (result.length === KEY_MAX) break;
-        let t = { kind: w.kind, label: null, targets: [] };
+        if (result.length === KEY_MAX || (mating && w.gain < MATE / 2)) break;
+        if (recap && w.rm.to === recap.sq && w.gain <= recap.value) continue;
+        const u = makeMove(pos, w.m);
+        let t = null;
         if (w.gain >= MATE / 2) {
-          t = { kind: 'mate', label: w.rm.san.endsWith('#') ? null : 'Mate', targets: [] };
-        } else if (!w.kind) {
-          if (w.rm.captured && w.gain - free < KEY_GAIN) continue;   // only cashes in what was already won
-          const u = makeMove(pos, w.m);
+          t = { kind: 'mate', targets: [], support: guards(pos, w.m.to) };
+        } else if (w.kind) {
+          t = { kind: w.kind, targets: [], support: [] };
+        } else if (!w.rm.captured || w.gain - free >= KEY_GAIN) {   // else it only cashes in what was already won
           t = motif(pos, w.m);
-          unmakeMove(pos, u);
-          // A capture that wins only as the end of an exchange is just the exchange going on.
-          if (w.rm.captured && t.kind === 'win') continue;
           const same = t.won >= 0 ? direct.get(t.won) : Math.max(-1, ...direct.values());
-          if (same !== undefined && same >= w.gain - 1) continue;
-          t.label = t.kind === 'win' ? `+${w.gain}` : MOTIF_LABEL[t.kind];
+          if (same !== undefined && same >= w.gain - 1) t = null;
+          else if (t.kind !== 'win') t.support.unshift(...guards(pos, w.m.to));
         }
-        if (result.some((r) => r.to === w.rm.to && r.kind === t.kind)) continue;
-        result.push({ from: w.rm.from, to: w.rm.to, kind: t.kind, label: t.label, targets: t.targets.map(sqName) });
+        unmakeMove(pos, u);
+        if (!t || result.some((r) => r.to === w.rm.to && r.kind === t.kind)) continue;
+        result.push({
+          from: w.rm.from, to: w.rm.to, kind: t.kind, targets: t.targets.map(sqName),
+          support: t.support.map(([a, c]) => [sqName(a), sqName(c)]),
+        });
       }
     } catch (err) {
       if (err !== OUT_OF_NODES) throw err;
     }
   }
   if (keyCache.size > 2000) keyCache.clear();
-  keyCache.set(fen, result);
+  keyCache.set(key, result);
   return result;
 }
 
+// Our pieces guarding square s when the opponent (to move) attacks it: what keeps the
+// piece that just landed there from simply being taken. [[from, s], ...]
+function guards(pos, s) {
+  const us = otherSide(pos.side);
+  return isAttacked(pos.b, s, pos.side) ? attackersOn(pos.b, s, us).map((d) => [d, s]) : [];
+}
+
 // A capture that wins at least KEY_GAIN on the spot, judged right after it: 'hanging'
-// if nothing can take back, 'trade' if what it took is worth that much more; else null.
+// if nothing can take back, 'trade' if the exchange that follows still leaves that much
+// (a cheaper piece taking a dearer one, or more attackers than defenders); else null.
 function onTheSpot(pos, m, rm) {
   const back = canTakeOn(pos, m.to);
-  if (VALUE[rm.captured] - (back ? VALUE[TYPE[pos.b[m.to]]] : 0) < KEY_GAIN) return null;
+  const lost = back ? Math.max(0, exchange(pos.b, m.to, pos.side)) : 0;
+  if (VALUE[rm.captured] - lost < KEY_GAIN) return null;
   return back ? 'trade' : 'hanging';
 }
 
@@ -1066,7 +1086,7 @@ function motif(pos, m) {
   const kd = lineDir(king, m.from);
   const s = kd ? firstOnLine(b, king, kd) : -1;
   if (s >= 0 && s !== m.to && sideOf(b[s]) === us && slides(TYPE[b[s]], kd) && between(king, s, m.from)) {
-    return { kind: 'discovered', targets: [king, ...wonList.filter((x) => x !== king)], won };
+    return { kind: 'discovered', targets: [king, ...wonList.filter((x) => x !== king)], won, support: [[s, king]] };
   }
 
   // Enemy pieces worth hitting: the king, anything worth more than the attacker, and
@@ -1077,7 +1097,7 @@ function motif(pos, m) {
     attackersOn(b, sq, them).every((d) => attacked.includes(d)));
   // A fork wins one of the pieces it hits, or makes the opponent give something up for
   // the forking piece, which we then retake on its square.
-  if (hits.length >= 2 && (hits.includes(won) || won === m.to)) return { kind: 'fork', targets: hits, won };
+  if (hits.length >= 2 && (hits.includes(won) || won === m.to)) return { kind: 'fork', targets: hits, won, support: [] };
   if (take && take.from === m.to) {
     // Along the mover's lines: a big piece (or the king) forced aside from what's behind it
     // is a skewer; a piece that can't move, or exposes something bigger if it does, is pinned.
@@ -1088,20 +1108,21 @@ function motif(pos, m) {
       if (back < 0 || sideOf(b[back]) !== them || (won !== front && won !== back)) continue;
       const f = TYPE[b[front]];
       const k = TYPE[b[back]];
-      if (won === back && (f === 'k' || VALUE[f] > VALUE[k])) return { kind: 'skewer', targets: [front, back], won };
-      if (k === 'k' || VALUE[k] > VALUE[f]) return { kind: 'pin', targets: [front, back], won };
+      const line = [[m.to, back]];
+      if (won === back && (f === 'k' || VALUE[f] > VALUE[k])) return { kind: 'skewer', targets: [front, back], won, support: line };
+      if (k === 'k' || VALUE[k] > VALUE[f]) return { kind: 'pin', targets: [front, back], won, support: line };
     }
   } else if (take && won >= 0 && between(take.from, won, m.from)) {
-    return { kind: 'discovered', targets: [won, ...hits.filter((x) => x !== won)], won };
+    return { kind: 'discovered', targets: [won, ...hits.filter((x) => x !== won)], won, support: [[take.from, won]] };
   }
   // Piling up on a piece that's already pinned.
-  const to = won >= 0 ? pinnedTo(b, won, us) : -1;
-  if (to >= 0) return { kind: 'pin', targets: [won, to], won };
-  return { kind: 'win', targets: wonList, won };
+  const pin = won >= 0 ? pinnedTo(b, won, us) : null;
+  if (pin) return { kind: 'pin', targets: [won, pin.behind], won, support: [[pin.pinner, pin.behind]] };
+  return { kind: 'win', targets: wonList, won, support: [] };
 }
 
 // The line behind a winning move, the opponent to move: their best reply, then the
-// capture we answer it with (null if we'd rather not capture).
+// capture we answer it with (null if we'd rather not capture, or check first).
 function principal(pos) {
   let reply = null;
   let best = -Infinity;
@@ -1121,9 +1142,9 @@ function principal(pos) {
   const check = isAttacked(pos.b, pos.king[pos.side], u.side);
   let top = check ? -Infinity : standPat(pos);
   let take = null;
-  for (const m of genMoves(pos, !check)) {
+  for (const m of genMoves(pos, false)) {
     const v = makeMove(pos, m);
-    if (leavesKingSafe(pos, v)) {
+    if (leavesKingSafe(pos, v) && (check || m.victim || m.promo || givesCheck(pos, v))) {
       const score = -quiesce(pos, -MATE, -top, Q_DEPTH - 1, false);
       if (score > top) {
         top = score;
@@ -1240,7 +1261,8 @@ function firstOnLine(b, s, d) {
   return -1;
 }
 
-// What the enemy piece on s is pinned to by one of our line pieces (its square), or -1.
+// The enemy piece on s pinned by one of our line pieces: { pinner, behind } (what it's
+// pinned to), or null.
 function pinnedTo(b, s, us) {
   for (const d of LINES) {
     for (const dir of [d, -d]) {
@@ -1249,10 +1271,10 @@ function pinnedTo(b, s, us) {
       if (pinner < 0 || behind < 0 || sideOf(b[pinner]) !== us || sideOf(b[behind]) === us) continue;
       if (!slides(TYPE[b[pinner]], dir)) continue;
       const k = TYPE[b[behind]];
-      if (k === 'k' || VALUE[k] > VALUE[TYPE[b[s]]]) return behind;
+      if (k === 'k' || VALUE[k] > VALUE[TYPE[b[s]]]) return { pinner, behind };
     }
   }
-  return -1;
+  return null;
 }
 
 // Pseudo-legal moves for the side to move, captures first (the most valuable victim,
@@ -1355,6 +1377,7 @@ function unmakeMove(pos, u) {
 }
 
 const leavesKingSafe = (pos, u) => !isAttacked(pos.b, pos.king[u.side], pos.side);
+const givesCheck = (pos, u) => isAttacked(pos.b, pos.king[pos.side], u.side);
 
 // Material for the side to move if it stops here. If the opponent's last move left two
 // of its pieces en prise at once (a fork of its own), only one can be saved: the smaller
@@ -1461,8 +1484,9 @@ function bestReply(pos, alpha, beta) {
 }
 
 // Captures until the side to move would rather stop (every move while in check).
-// `wary` is for the move right after the opponent's reply: stopping there also has to
-// reckon with whatever that reply set up to take next (a fork of its own, say).
+// `wary` is for the move right after the opponent's reply: checks count there too (a
+// fork with check, a mate in two), and stopping has to reckon with whatever that reply
+// set up to take next (a fork of its own, say).
 function quiesce(pos, alpha, beta, depth, wary) {
   if (++keyNodes > NODE_BUDGET) throw OUT_OF_NODES;
   const check = isAttacked(pos.b, pos.king[pos.side], otherSide(pos.side));
@@ -1475,11 +1499,12 @@ function quiesce(pos, alpha, beta, depth, wary) {
     return own(pos);
   }
   let moved = false;
-  for (const m of genMoves(pos, !check)) {
+  for (const m of genMoves(pos, !check && !wary)) {
+    const quiet = !m.victim && !m.promo;
     // A capture that can't lift the score past alpha even if it went unanswered isn't worth a look.
-    if (!check && best + m.victim + (m.promo ? 8 : 0) < alpha) continue;
+    if (!check && !quiet && best + m.victim + (m.promo ? 8 : 0) < alpha) continue;
     const u = makeMove(pos, m);
-    if (leavesKingSafe(pos, u)) {
+    if (leavesKingSafe(pos, u) && (check || !quiet || givesCheck(pos, u))) {
       moved = true;
       const score = -quiesce(pos, -beta, -alpha, depth - 1, false);
       if (score > best) best = score;
@@ -1574,7 +1599,7 @@ function render() {
   renderBars(ply, idx);
   renderMoves(idx);
   renderMeta();
-  drawArrows(ply, renderAnalysis(ply, idx));
+  drawArrows(ply, renderAnalysis(ply, idx), idx > 0 ? game.plies[idx - 1] : null);
   renderWorst(idx);
   renderTally();
   syncSections();
@@ -1812,8 +1837,9 @@ const TACTIC_COLOR = {
   fork: MOTIF_COLOR, pin: MOTIF_COLOR, skewer: MOTIF_COLOR, discovered: MOTIF_COLOR, win: MOTIF_COLOR,
 };
 
-// Rings, then tactics (the opponent's threats lowest), engine arrows on top, labels over everything.
-function drawArrows(ply, engineArrows) {
+// Rings, then tactics with their thin support arrows (the opponent's threats lowest), engine
+// arrows on top, labels over everything. `prev` is the position before `ply`.
+function drawArrows(ply, engineArrows, prev) {
   let svg = el.board.querySelector('svg.arrows');
   if (!svg) {
     svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1823,24 +1849,42 @@ function drawArrows(ply, engineArrows) {
   }
   const list = [];
   const rings = [];
+  const support = [];
   const variant = state.game?.info?.variant?.key || 'standard';
   if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
-    const add = (fen, dash) => {
-      for (const t of (state.opts.simple ? keyTactics(fen) : tactics(fen))) {
+    const add = (fen, dash, recap) => {
+      for (const t of (state.opts.simple ? keyTactics(fen, recap) : tactics(fen))) {
         const color = TACTIC_COLOR[t.kind];
         const opacity = dash ? 0.55 : 0.85;
-        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash, label: t.label });
-        // Rings on what the move hits: the forked pieces, the pinned piece and what's behind it.
+        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash });
+        // Thin arrows for what makes it work (the pieces guarding the square it lands on,
+        // the line it uncovers or pins along), rings on what it hits.
+        for (const [from, to] of t.support || []) support.push({ from, to, color, width: 0.05, opacity: opacity * 0.8, dash });
         for (const sq of t.targets || []) rings.push({ sq, color, opacity, dash });
       }
     };
     // Passing the turn is meaningless while the side to move is in check.
-    if (state.opts.threats && !findCheckedKing(ply.fen)) add(passTurn(ply.fen), true);
-    add(ply.fen, false);
+    if (state.opts.threats && !findCheckedKing(ply.fen)) add(passTurn(ply.fen), true, null);
+    add(ply.fen, false, lastCapture(prev, ply));
   }
   for (const a of engineArrows) list.push({ ...a, from: a.uci.slice(0, 2), to: a.uci.slice(2, 4) });
   const labels = [];
-  svg.innerHTML = rings.map(ringSvg).join('') + list.map((a) => arrowSvg(a, labels)).join('') + labels.map((l) => l.svg).join('');
+  svg.innerHTML = rings.map(ringSvg).join('') + [...support, ...list].map((a) => arrowSvg(a, labels)).join('') +
+    labels.map((l) => l.svg).join('');
+}
+
+// What the move into `ply` took, as { sq, value }, or null.
+function lastCapture(prev, ply) {
+  if (!prev || !ply?.lm) return null;
+  const grid = fenGrid(prev.fen);
+  const at = (sq) => grid[8 - +sq[1]][sq.charCodeAt(0) - 97];
+  const from = ply.lm.slice(0, 2);
+  const to = ply.lm.slice(2, 4);
+  const mover = at(from);
+  const taken = at(to);
+  if (!mover) return null;
+  if (taken) return sideOf(taken) !== sideOf(mover) ? { sq: to, value: VALUE[TYPE[taken]] } : null;   // not castling
+  return TYPE[mover] === 'p' && from[0] !== to[0] ? { sq: to, value: 1 } : null;   // en passant
 }
 
 function ringSvg(r) {
