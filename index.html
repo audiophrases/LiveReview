@@ -19,45 +19,56 @@
 
 <main class="layout">
   <section class="stage">
-    <div class="bar" id="barTop"></div>
-    <div class="boardwrap">
-      <div class="evalbar" id="evalbar" aria-label="Engine evaluation"><div class="fill" id="evalfill"></div><span id="evaltext"></span></div>
-      <div class="board" id="board"></div>
+    <div class="boardunit" id="boardunit">
+      <div class="bar" id="barTop" title="Drag to move the board (double-click to reset)"></div>
+      <div class="boardwrap">
+        <div class="evalbar" id="evalbar" aria-label="Engine evaluation"><div class="fill" id="evalfill"></div><span id="evaltext"></span></div>
+        <div class="board" id="board"></div>
+      </div>
+      <div class="bar" id="barBottom" title="Drag to move the board (double-click to reset)"></div>
+      <div class="boardresize" id="boardResize" title="Drag to resize the board (double-click to reset)"></div>
     </div>
-    <div class="bar" id="barBottom"></div>
-    <div class="controls">
-      <button id="first" title="First move (Home)">⏮</button>
-      <button id="prev" title="Previous move (←)">◀</button>
-      <button id="next" title="Next move (→)">▶</button>
-      <button id="live" title="Back to live (End)">Live</button>
-      <button id="flip" title="Flip board (F)">Flip</button>
-      <button id="sound" title="Move sound (M)">Sound on</button>
-      <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
-      <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
-      <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
-      <button id="tacticsToggle" title="Show tactics that win material: hanging pieces, winning trades, forks, pins, skewers, mate (T)">Tactics</button>
-      <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
-    </div>
-    <div id="legend" class="legend" hidden>
-      <span class="full"><i class="key capture"></i>Capture</span>
-      <span class="easy"><i class="key capture"></i>Hanging piece</span>
-      <span class="easy"><i class="key trade"></i>Winning trade</span>
-      <span class="easy"><i class="key motif"></i>Fork, pin, skewer, discovered attack</span>
-      <span class="easy"><i class="key thin"></i>What backs it up</span>
-      <span class="full"><i class="key check"></i>Check / mate</span>
-      <span class="easy"><i class="key check"></i>Mate</span>
-      <span class="full"><i class="key queen"></i>Attacks the queen</span>
-      <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
+    <div class="controlpanel panel" id="controlpanel" data-panel="controls" data-size="width">
+      <div class="controls">
+        <button id="first" title="First move (Home)">⏮</button>
+        <button id="prev" title="Previous move (←)">◀</button>
+        <button id="next" title="Next move (→)">▶</button>
+        <button id="live" title="Back to live (End)">Live</button>
+        <button id="flip" title="Flip board (F)">Flip</button>
+        <button id="sound" title="Move sound (M)">Sound on</button>
+        <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
+        <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
+        <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
+        <button id="tacticsToggle" title="Show tactics on the board: hanging pieces, winning trades, checks, mate… (T). Pick which ones in Analysis settings.">Tactics</button>
+        <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
+      </div>
+      <div id="legend" class="legend" hidden>
+        <span data-kind="mate"><i class="key mate"></i>Mate in one or two</span>
+        <span data-kind="fork"><i class="key fork"></i>Fork</span>
+        <span data-kind="pin"><i class="key pin"></i>Pin</span>
+        <span data-kind="skewer"><i class="key skewer"></i>Skewer</span>
+        <span data-kind="discovered"><i class="key discovered"></i>Discovered attack</span>
+        <span data-kind="removal"><i class="key removal"></i>Removal of the defender</span>
+        <span data-kind="zwischen"><i class="key zwischen"></i>Zwischenzug</span>
+        <span data-kind="hanging"><i class="key hanging"></i>Hanging piece</span>
+        <span data-kind="trade"><i class="key trade"></i>Winning trade</span>
+        <span data-kind="pressure"><i class="key pressure"></i>Attackers vs defenders</span>
+        <span data-kind="check"><i class="key check"></i>Check</span>
+        <span data-kind="queen"><i class="key queen"></i>Attacks the queen</span>
+        <span data-kind="capture"><i class="key capture"></i>Capture</span>
+        <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
+      </div>
     </div>
   </section>
 
-  <aside class="side analysis" id="analysis">
+  <aside class="side analysis panel" id="analysis" data-panel="analysis" data-size="both">
+    <div class="pscroll">
     <div class="head-block">
       <p id="status" class="status">Connecting…</p>
       <div id="meta" class="meta"></div>
     </div>
     <details class="sec" data-sec="worst" open>
-      <summary><span class="t">Biggest mistake</span></summary>
+      <summary><span class="t" id="worstTitle">Blunder previews</span></summary>
       <div class="sec-body"><div id="worst" class="worst"></div></div>
     </details>
     <details class="sec" data-sec="engine" open>
@@ -76,10 +87,24 @@
       <label><input type="checkbox" data-opt="alts"> 2nd and 3rd best moves (with eval drop)</label>
       <label><input type="checkbox" data-opt="lines"> Engine lines</label>
       <label><input type="checkbox" data-opt="symbols"> Move symbols (!! ! ★ !? ?! ? ??)</label>
-      <label><input type="checkbox" data-opt="worst"> Biggest-mistake preview</label>
-      <label><input type="checkbox" data-opt="tactics" data-noengine> Tactics on the board</label>
-      <label><input type="checkbox" data-opt="simple" data-noengine> …only ones that win material: hanging pieces, winning trades, forks, pins, skewers, mate</label>
-      <label><input type="checkbox" data-opt="threats" data-noengine> …and the opponent's threats (dashed)</label>
+      <label><input type="checkbox" data-opt="worst"> Blunder previews</label>
+      <label><input type="checkbox" data-opt="tactics" data-noengine> Tactics on the board <span class="hint">(T)</span></label>
+      <div id="tacticOpts" class="subopts">
+        <label><input type="checkbox" data-opt="tMate" data-noengine> Mate in one or two</label>
+        <label><input type="checkbox" data-opt="tFork" data-noengine> Forks</label>
+        <label><input type="checkbox" data-opt="tPin" data-noengine> Pins</label>
+        <label><input type="checkbox" data-opt="tSkewer" data-noengine> Skewers</label>
+        <label><input type="checkbox" data-opt="tDiscovered" data-noengine> Discovered attacks</label>
+        <label><input type="checkbox" data-opt="tRemoval" data-noengine> Removal of the defender</label>
+        <label><input type="checkbox" data-opt="tZwischen"> Zwischenzug <span class="hint">(needs the engine)</span></label>
+        <label><input type="checkbox" data-opt="tHanging" data-noengine> Hanging pieces</label>
+        <label><input type="checkbox" data-opt="tTrade" data-noengine> Winning trades</label>
+        <label><input type="checkbox" data-opt="tPressure" data-noengine> Attackers vs defenders (e.g. 2v2)</label>
+        <label><input type="checkbox" data-opt="tCheck" data-noengine> Checks</label>
+        <label><input type="checkbox" data-opt="tQueen" data-noengine> Attacks on the queen</label>
+        <label><input type="checkbox" data-opt="tCapture" data-noengine> All other captures</label>
+        <label><input type="checkbox" data-opt="threats" data-noengine> Opponent's threats too (dashed)</label>
+      </div>
       <label>Depth
         <select data-opt="depth">
           <option value="12">12 (fast)</option><option value="16">16</option><option value="18">18</option>
@@ -92,11 +117,13 @@
           <option value="4">4</option><option value="5">5</option>
         </select>
       </label>
+      <button id="boardReset" class="reset" type="button">Reset layout (board and panels)</button>
       </div>
     </details>
+    </div>
   </aside>
 
-  <aside class="side movespanel" id="movespanel">
+  <aside class="side movespanel panel" id="movespanel" data-panel="moves" data-size="both">
     <h2 class="movestitle">Moves</h2>
     <ol id="moves" class="moves"></ol>
   </aside>

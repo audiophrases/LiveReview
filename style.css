@@ -27,8 +27,10 @@
 }
 
 * { box-sizing: border-box; }
+html { scrollbar-gutter: stable; }
 body {
   margin: 0;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
   font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -143,6 +145,7 @@ a { color: var(--accent); }
 .meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; overflow-wrap: anywhere; }
 .movestitle { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .movespanel { display: flex; flex-direction: column; }
+.analysis { display: flex; flex-direction: column; }
 .moves {
   list-style: none;
   margin: 0;
@@ -223,7 +226,6 @@ a { color: var(--accent); }
     top: 16px;
     max-height: calc(100vh - 100px);
   }
-  .analysis { overflow-y: auto; }
   .movespanel { height: calc(100vh - 100px); }
   .moves { max-height: none; }
   .moves button { padding: 4px 8px; }
@@ -346,7 +348,7 @@ a { color: var(--accent); }
 .controls #bestToggle.on { background: #2f7fd8; border-color: #2f7fd8; color: #fff; }
 .controls button:disabled { opacity: 0.5; cursor: default; }
 
-/* ---------- alternatives, tactics, biggest mistake ---------- */
+/* ---------- alternatives, tactics, blunder previews ---------- */
 .engine .drop {
   flex: none;
   font-size: 11px;
@@ -365,13 +367,20 @@ a { color: var(--accent); }
 .legend[hidden] { display: none; }
 .legend:not(.threats) .opp { display: none; }
 .legend .key { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
-.legend .key.capture { background: #e58f2a; }
-.legend .key.check { background: #d6352b; }
-.legend.simple .full, .legend:not(.simple) .easy { display: none; }
+.legend [hidden] { display: none; }
+.legend .key.mate { background: #8e1b1b; height: 4px; }
+.legend .key.hanging { background: #e58f2a; }
 .legend .key.trade { background: #2e9d57; }
-.legend .key.motif { background: #a24bd1; }
-.legend .key.thin { height: 1px; background: var(--muted); }
+.legend .key.check { background: #d6352b; }
 .legend .key.queen { background: #a24bd1; }
+.legend .key.capture { background: #6f6f78; }
+.legend .key.fork { background: #e91e63; }
+.legend .key.pin { background: #00a3a3; }
+.legend .key.skewer { background: #3949ab; }
+.legend .key.discovered { background: #ef6c00; }
+.legend .key.removal { background: #6d4c41; }
+.legend .key.zwischen { background: #b8860b; }
+.legend .key.pressure { background: #546e7a; }
 .legend .key.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 8px); }
 
 .worst { font-size: 13px; }
@@ -405,4 +414,103 @@ a { color: var(--accent); }
 @media (max-width: 860px) {
   .thumb { width: 88px; }
 }
-.worst-card.cur::after { content: "on the board"; align-self: flex-start; margin-left: auto; font-size: 11px; color: var(--accent); white-space: nowrap; }
+
+.settings .hint { color: var(--muted); font-size: 11px; margin-left: auto; }
+.subopts { margin: 0 0 4px 22px; padding-left: 10px; border-left: 2px solid var(--line); }
+.subopts.off { opacity: 0.55; }
+
+/* ---------- movable, resizable board ----------
+   The board, its eval bar, the player bars and every arrow and badge are one box. It is moved and
+   scaled with a transform, which never changes the page layout, so the panels around it stay put. */
+.boardunit {
+  position: relative;
+  transform-origin: 0 0;
+  transform: translate(var(--bx, 0px), var(--by, 0px)) scale(var(--bk, 1));
+  --bk: 1;
+}
+.boardunit.moved { z-index: 20; }
+.boardunit .bar { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.boardunit.dragging .bar { cursor: grabbing; }
+.boardunit.dragging, .boardunit.resizing { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.boardresize {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: calc(22px / var(--bk));
+  height: calc(22px / var(--bk));
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background:
+    linear-gradient(135deg, transparent 0 50%, var(--accent) 50% 58%, transparent 58% 70%, var(--accent) 70% 78%, transparent 78%);
+  border-bottom-right-radius: 4px;
+}
+.boardunit:hover .boardresize, .boardunit.resizing .boardresize { opacity: 0.85; }
+@media (hover: none) { .boardresize { opacity: 0.6; } }
+.settings .reset { margin-top: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; }
+
+/* ---------- movable, resizable panels ----------
+   Panels move with the `translate` property (no reflow) and resize by width and height. A small
+   grip on the top edge moves a panel, a corner handle resizes it; both show on hover. */
+.pscroll { flex: 1; min-height: 0; overflow-y: auto; }
+.panel { position: relative; }
+@media (min-width: 1250px) {
+  .analysis.panel, .movespanel.panel { position: sticky; }
+}
+.panel { translate: var(--px, 0px) var(--py, 0px); }
+.panel.sized { max-height: none; }
+.panel.sized .moves { max-height: none; }
+.controlpanel { padding-top: 2px; }
+.panelgrip {
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  width: 44px;
+  height: 12px;
+  margin-left: -22px;
+  border-radius: 999px;
+  background: var(--line);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 2;
+}
+.panelgrip::after {
+  content: "";
+  position: absolute;
+  inset: 4px 9px;
+  background: repeating-linear-gradient(90deg, var(--muted) 0 3px, transparent 3px 6px);
+  border-radius: 2px;
+  opacity: 0.8;
+}
+.panelresize {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 2;
+  background: linear-gradient(135deg, transparent 0 50%, var(--accent) 50% 58%, transparent 58% 70%, var(--accent) 70% 78%, transparent 78%);
+  border-bottom-right-radius: 6px;
+}
+.controlpanel[data-size="width"] .panelresize { cursor: ew-resize; }
+.panel:hover > .panelgrip, .panel:hover > .panelresize,
+.panel.dragging > .panelgrip, .panel.resizing > .panelresize { opacity: 0.9; }
+@media (hover: none) { .panelgrip, .panelresize { opacity: 0.6; } }
+.panel.dragging, .panel.resizing { outline: 2px dashed var(--accent); outline-offset: 3px; }
+.panel.dragging > .panelgrip { cursor: grabbing; }
+
+body.moving, body.moving * { user-select: none !important; -webkit-user-select: none !important; cursor: grabbing; }
+
+.pickfolder.resume { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+/* every blunder as a small card; as many columns as the panel width allows */
+.worst-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.worst-list .worst-card { gap: 8px; padding: 5px; }
+.worst-list .thumb { width: 80px; }

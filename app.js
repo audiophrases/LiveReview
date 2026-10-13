@@ -14,7 +14,9 @@ const USER_POLL_MS = 4000;
 const TV_CHECK_MS = 10000;
 const RATE_LIMIT_WAIT_MS = 60000;
 const LAST_USER_KEY = 'livewatch.user';
+const SOURCE_KEY = 'livewatch.source';  // what was watched last: 'user' or 'folder'
 const ENGINE_KEY = 'livewatch.engine';
+const SOUND_KEY = 'livewatch.sound';
 const OPTS_KEY = 'livewatch.opts';
 const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
 const SWEEP_LINES = 2;
@@ -39,7 +41,7 @@ const el = {
   live: $('live'), flip: $('flip'), sound: $('sound'),
   userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
-  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), legend: $('legend'), worst: $('worst'), tally: $('tally'),
+  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'), legend: $('legend'), worst: $('worst'), worstTitle: $('worstTitle'), tally: $('tally'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
   evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
@@ -60,11 +62,14 @@ const state = {
   analysis: true,
   opts: {
     bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
-    tactics: false, simple: true, threats: false, depth: 18, multipv: 3,
+    tactics: false, tMate: true, tHanging: true, tTrade: true, tCheck: true, tQueen: true, tCapture: false,
+    tFork: true, tPin: true, tSkewer: true, tDiscovered: true, tPressure: true, tRemoval: true, tZwischen: true,
+    threats: false, depth: 18, multipv: 3,
   },
 };
 try {
   state.analysis = localStorage.getItem(ENGINE_KEY) !== 'off';
+  state.sound = localStorage.getItem(SOUND_KEY) !== 'off';
   Object.assign(state.opts, JSON.parse(localStorage.getItem(OPTS_KEY) || '{}'));
 } catch { /* optional */ }
 
@@ -111,7 +116,11 @@ function watchUser(name) {
   state.view = null;
   state.flipped = false;
   el.userInput.value = name;
-  try { localStorage.setItem(LAST_USER_KEY, name); } catch { /* optional */ }
+  try {
+    localStorage.setItem(LAST_USER_KEY, name);
+    localStorage.setItem(SOURCE_KEY, 'user');
+  } catch { /* optional */ }
+  clearResume();
   history.replaceState(null, '', `${location.pathname}?user=${encodeURIComponent(name)}`);
   document.title = `${name} · Live Watch`;
   setStatus(`Looking for ${name}…`);
@@ -232,20 +241,88 @@ function finish(game) {
 // ---------- following a folder of .jsonl files ----------
 // Another program appends one JSON object per line as a game goes on:
 //   { t, fen, turn, playerColor, gameUrl }
-// We follow the newest .jsonl file in a folder the user picks each time.
+// We follow the newest .jsonl file in a folder the user picks. The folder is remembered (its handle is
+// kept in IndexedDB), so the next session picks up where this one left off: straight away when the
+// browser still allows reading it, otherwise after one click on "Resume" (browsers only re-grant
+// access to a folder from a click).
 
 async function pickFolder() {
+  if (resumeHandle) return resumeFolder();
   if (!window.showDirectoryPicker) {
     setStatus('Your browser can’t open folders. Use Chrome, Edge or another Chromium browser (served from localhost).');
     return;
   }
   let handle;
   try {
-    handle = await window.showDirectoryPicker({ mode: 'read' });
+    handle = await window.showDirectoryPicker({ id: 'livewatch-games', mode: 'read' });
   } catch {
     return;  // cancelled
   }
   watchFolder(handle);
+}
+
+// A tiny IndexedDB key-value store: folder handles can't go in localStorage.
+function idb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('livewatch', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('kv');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction('kv', mode);
+      const req = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => { open.result.close(); resolve(req?.result); };
+      tx.onerror = () => { open.result.close(); reject(tx.error); };
+    };
+  });
+}
+const saveFolderHandle = (handle) => idb('readwrite', (store) => store.put(handle, 'folder')).catch(() => {});
+const loadFolderHandle = () => idb('readonly', (store) => store.get('folder')).catch(() => null);
+
+// A remembered folder the browser wants a click before reading again.
+let resumeHandle = null;
+
+function offerResume(handle) {
+  resumeHandle = handle;
+  el.folderBtn.textContent = `Resume “${handle.name}”`;
+  el.folderBtn.classList.add('resume');
+  el.folderBtn.title = `Keep watching the folder ${handle.name} from last time`;
+  setStatus(`Last time you watched the folder “${handle.name}”. Click Resume to carry on (your browser asks once).`);
+}
+
+function clearResume() {
+  resumeHandle = null;
+  el.folderBtn.textContent = 'Watch folder…';
+  el.folderBtn.classList.remove('resume');
+  el.folderBtn.title = 'Review a game live from the newest .jsonl file in a folder';
+}
+
+async function resumeFolder() {
+  const handle = resumeHandle;
+  let granted = false;
+  try {
+    granted = (await handle.requestPermission({ mode: 'read' })) === 'granted';
+  } catch { /* the folder may be gone */ }
+  clearResume();
+  if (granted) {
+    watchFolder(handle);
+  } else {
+    setStatus(`No access to “${handle.name}”. Use Watch folder… to pick it again.`);
+  }
+}
+
+// On startup: carry on with the folder from last time if that's what was being watched.
+// Returns true when the folder took over (watching, or waiting for the Resume click).
+async function restoreFolder() {
+  let source = null;
+  try { source = localStorage.getItem(SOURCE_KEY); } catch { /* optional */ }
+  if (source !== 'folder' || !window.showDirectoryPicker) return false;
+  const handle = await loadFolderHandle();
+  if (!handle) return false;
+  let permission = 'prompt';
+  try { permission = await handle.queryPermission({ mode: 'read' }); } catch { /* treat as prompt */ }
+  if (permission === 'granted') watchFolder(handle);
+  else offerResume(handle);
+  return true;
 }
 
 function stopFolder() {
@@ -264,6 +341,9 @@ function watchFolder(handle) {
   state.view = null;
   state.flipped = false;
   state.folder = { handle, timer: null, file: null, mtime: 0, size: -1, lines: 0 };
+  clearResume();
+  saveFolderHandle(handle);
+  try { localStorage.setItem(SOURCE_KEY, 'folder'); } catch { /* optional */ }
   el.userInput.value = '';
   el.open.removeAttribute('href');
   history.replaceState(null, '', location.pathname);
@@ -823,18 +903,6 @@ function classify(i) {
   return null;
 }
 
-// The worst inaccuracy, mistake or blunder either side has played so far: { i, lost, kind }.
-function worstMove() {
-  const plies = state.game?.plies || [];
-  let worst = null;
-  for (let i = 1; i < plies.length; i++) {
-    const lost = moveLoss(i);
-    if (lost != null && lost >= 0.1 && (!worst || lost > worst.lost)) worst = { i, lost };
-  }
-  if (worst) worst.kind = classify(worst.i);
-  return worst;
-}
-
 // The same position with the other side to move (a "null move").
 function passTurn(fen) {
   const parts = fen.split(' ');
@@ -896,30 +964,326 @@ function playOnGrid(grid, m) {
   return g;
 }
 
-// Captures, checks and fresh attacks on the queen open to the side to move:
-// [{ from, to, kind }], kind being 'mate', 'check', 'queen' or 'capture'.
-const TACTIC_RANK = { capture: 1, queen: 2, check: 3, mate: 4 };
+// Tactics open to the side to move, flagged by kind so each can be shown or hidden on its own.
+// Only ideas that matter are kept: each one has to win material (or mate) by the exchange count below,
+// and then hold up against the opponent's best reply (see forcedWins()).
+//   mate        checkmate in one (mates in two come from forcedWins())
+//   fork        the moved piece attacks two or more targets it would win (or the king), and survives there
+//   skewer      a bishop, rook or queen hits a big piece (or the king); once it moves, the piece behind falls
+//   hanging     wins a piece (minor or bigger) that nothing defends
+//   removal     captures a piece that was guarding another, which can then be won
+//   discovered  moving a piece opens a line onto a valuable target while the moved piece threatens too
+//   trade       wins material by capturing a defended piece, once every recapture is played out
+//   pin         a bishop, rook or queen pins a piece to a bigger one (or the king) and the pinned piece can be won
+//   pressure    adds an attacker so that a defended piece can now be won (attackers vs defenders)
+// Forcing moves that win nothing by themselves are only offered when nothing above is on, and only if safe:
+//   check       gives check
+//   queen       makes a new attack on the enemy queen with a cheaper piece (discovered attacks included)
+//   capture     any other capture
+// The zwischenzug needs the engine and is worked out separately (see zwischenzug()).
+const TACTIC_RANK = {
+  capture: 1, queen: 2, check: 3, pressure: 4, pin: 5, trade: 6,
+  discovered: 7, removal: 8, hanging: 9, skewer: 10, fork: 11, mate: 12,
+};
+const TACTIC_OPT = {
+  mate: 'tMate', fork: 'tFork', skewer: 'tSkewer', hanging: 'tHanging', removal: 'tRemoval',
+  discovered: 'tDiscovered', trade: 'tTrade', pin: 'tPin', pressure: 'tPressure',
+  check: 'tCheck', queen: 'tQueen', capture: 'tCapture', zwischen: 'tZwischen',
+};
+const SEE_VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 100 };
+
+// Static exchange evaluation: what the mover nets by making the capture m on its square when both
+// sides keep recapturing there with their cheapest piece (stopping whenever that is better).
+// Hidden attackers that line up behind a piece that has just taken come into play (x-rays).
+function exchangeGain(grid, m) {
+  const g = playOnGrid(grid, m);
+  const gain = [SEE_VALUE[m.captured]];
+  let onTarget = SEE_VALUE[m.promotion || m.piece];
+  let side = m.color === 'w' ? 'b' : 'w';
+  for (let d = 1; d < 32; d++) {
+    const attackers = attackersOf(g, m.to, side);
+    if (!attackers.length) break;
+    let from = attackers[0];
+    let cost = Infinity;
+    for (const sq of attackers) {
+      const v = SEE_VALUE[g[8 - +sq[1]][sq.charCodeAt(0) - 97].toLowerCase()];
+      if (v < cost) { cost = v; from = sq; }
+    }
+    gain.push(onTarget - gain[d - 1]);
+    onTarget = cost;
+    g[8 - +from[1]][from.charCodeAt(0) - 97] = null;
+    side = side === 'w' ? 'b' : 'w';
+  }
+  for (let d = gain.length - 1; d > 0; d--) gain[d - 1] = -Math.max(-gain[d - 1], gain[d]);
+  return gain[0];
+}
+
+// ----- board geometry on fenGrid boards (grid[0] is rank 8) -----
+const DIAGONALS = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+const ORTHOGONALS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+const cellAt = (g, sq) => g[8 - +sq[1]][sq.charCodeAt(0) - 97];
+const sqName = (f, r) => FILES[f] + (r + 1);
+const onBoard = (f, r) => f >= 0 && f < 8 && r >= 0 && r < 8;
+const colorOf = (p) => (p === p.toUpperCase() ? 'w' : 'b');
+const typeOf = (p) => p.toLowerCase();
+
+// Directions a piece slides in, or null for pawns, knights and kings.
+function slideDirs(type) {
+  if (type === 'b') return DIAGONALS;
+  if (type === 'r') return ORTHOGONALS;
+  if (type === 'q') return [...DIAGONALS, ...ORTHOGONALS];
+  return null;
+}
+
+// Squares attacked by the piece on sq (sliders stop at, and include, the first piece in the way).
+function attacksFrom(g, sq) {
+  const p = cellAt(g, sq);
+  if (!p) return [];
+  const f0 = sq.charCodeAt(0) - 97;
+  const r0 = +sq[1] - 1;
+  const t = typeOf(p);
+  const out = [];
+  if (t === 'p') {
+    const dr = colorOf(p) === 'w' ? 1 : -1;
+    for (const df of [-1, 1]) if (onBoard(f0 + df, r0 + dr)) out.push(sqName(f0 + df, r0 + dr));
+  } else if (t === 'n' || t === 'k') {
+    for (const [df, dr] of t === 'n' ? KNIGHT_STEPS : KING_STEPS) if (onBoard(f0 + df, r0 + dr)) out.push(sqName(f0 + df, r0 + dr));
+  } else {
+    for (const [df, dr] of slideDirs(t)) {
+      for (let f = f0 + df, r = r0 + dr; onBoard(f, r); f += df, r += dr) {
+        out.push(sqName(f, r));
+        if (g[7 - r][f]) break;
+      }
+    }
+  }
+  return out;
+}
+
+// The occupied squares met walking from sq (exclusive) in one direction, nearest first.
+function piecesAlong(g, sq, df, dr, max = 2) {
+  const out = [];
+  for (let f = sq.charCodeAt(0) - 97 + df, r = +sq[1] - 1 + dr; onBoard(f, r) && out.length < max; f += df, r += dr) {
+    if (g[7 - r][f]) out.push(sqName(f, r));
+  }
+  return out;
+}
+
+// Exchange result for the piece on `from` capturing the piece on `to` (see exchangeGain).
+function captureGain(g, from, to) {
+  const p = cellAt(g, from);
+  const q = cellAt(g, to);
+  return exchangeGain(g, { from, to, piece: typeOf(p), captured: typeOf(q), color: colorOf(p), flags: 'c' });
+}
+
+// The most the opponent can win by capturing the piece on sq (0 or less: it is safe there).
+function pieceAtRisk(g, sq) {
+  const them = colorOf(cellAt(g, sq)) === 'w' ? 'b' : 'w';
+  let worst = -Infinity;
+  for (const a of attackersOf(g, sq, them)) worst = Math.max(worst, captureGain(g, a, sq));
+  return worst;
+}
+
+// The best `color` can do by capturing on sq: the exchange result of its best capture there.
+function bestCaptureOn(g, sq, color) {
+  let best = { gain: -Infinity, from: null };
+  for (const a of attackersOf(g, sq, color)) {
+    const gain = captureGain(g, a, sq);
+    if (gain > best.gain) best = { gain, from: a };
+  }
+  return best;
+}
+
+// Each detector returns { lines, gain, key } or null when the move isn't that tactic (or isn't worth it):
+// lines are the extra lines drawn with the move ([{ from, to, dash }]), gain is the material it wins
+// (pawns), key names the idea so two moves doing the same thing are shown once.
+// `grid` is the board before the move m, `after` the board once it is played, `me` the side moving.
+
+// The squares holding pieces of the other side that the piece on sq attacks, with what taking each would win.
+function targetsOf(g, sq, me) {
+  const out = [];
+  for (const t of attacksFrom(g, sq)) {
+    const p = cellAt(g, t);
+    if (!p || colorOf(p) === me) continue;
+    out.push({ sq: t, king: typeOf(p) === 'k', gain: typeOf(p) === 'k' ? Infinity : captureGain(g, sq, t) });
+  }
+  return out;
+}
+
+function detectFork(after, m, me) {
+  if (pieceAtRisk(after, m.to) > 0) return null;  // the forking piece would just be taken
+  const targets = targetsOf(after, m.to, me).filter((t) => t.king || (SEE_VALUE[typeOf(cellAt(after, t.sq))] >= 3 && t.gain > 0));
+  if (targets.length < 2) return null;
+  // The opponent saves the most valuable target (or answers the check); the next one falls.
+  const gains = targets.map((t) => t.gain).sort((x, y) => y - x);
+  const captured = m.captured && !m.flags.includes('e') ? SEE_VALUE[m.captured] : 0;
+  return {
+    lines: targets.map((t) => ({ from: m.to, to: t.sq })),
+    gain: gains[1] + captured,
+    key: `fork:${targets.map((t) => t.sq).sort().join()}`,
+  };
+}
+
+// Pins and skewers made by the moved bishop, rook or queen: { pin, skewer }.
+function detectLine(after, m, me) {
+  const mover = cellAt(after, m.to);
+  const dirs = slideDirs(typeOf(mover));
+  if (!dirs || pieceAtRisk(after, m.to) > 0) return {};
+  const fx = m.from.charCodeAt(0) - m.to.charCodeAt(0);
+  const fy = +m.from[1] - +m.to[1];
+  const found = {};
+  for (const [df, dr] of dirs) {
+    if (fx * dr - fy * df === 0) continue;  // moved along this line: the pin or skewer was already there
+    const [a, b] = piecesAlong(after, m.to, df, dr);
+    if (!a || !b) continue;
+    const A = cellAt(after, a);
+    const B = cellAt(after, b);
+    if (colorOf(A) === me || colorOf(B) === me) continue;
+    const vA = SEE_VALUE[typeOf(A)];
+    const vB = SEE_VALUE[typeOf(B)];
+    if (vA < vB && vA >= 3) {
+      // A pin matters when the pinned piece, which can't step aside, can now be won.
+      const gain = bestCaptureOn(after, a, me).gain;
+      if (gain >= 1 && !(found.pin?.gain >= gain)) found.pin = { lines: [{ from: m.to, to: b }], gain, key: `pin:${a}` };
+    } else if (vA > vB && vB >= 3) {
+      // A skewer: once the front piece gets out of the way, the one behind is taken.
+      const g2 = after.map((row) => row.slice());
+      g2[8 - +a[1]][a.charCodeAt(0) - 97] = null;
+      const gain = captureGain(g2, m.to, b);
+      if (gain >= 2 && !(found.skewer?.gain >= gain)) found.skewer = { lines: [{ from: m.to, to: b }], gain, key: `skewer:${b}` };
+    }
+  }
+  return found;
+}
+
+// A bishop, rook or queen behind the moved piece now hits something, while the moved piece threatens too
+// (or gives a discovered check while it captures or attacks something).
+function detectDiscovered(grid, after, m, me) {
+  if (m.flags.includes('k') || m.flags.includes('q')) return null;
+  // What the moved piece achieves on its own: a capture, or a second target it would win.
+  const moverHits = targetsOf(after, m.to, me).filter((t) => !t.king && t.gain >= 2);
+  let best = null;
+  for (const [df, dr] of [...DIAGONALS, ...ORTHOGONALS]) {
+    const [behind] = piecesAlong(after, m.from, -df, -dr, 1);
+    if (!behind || behind === m.to) continue;  // the moved piece itself is not a discovery
+    const S = cellAt(after, behind);
+    if (colorOf(S) !== me || !slideDirs(typeOf(S))?.some(([x, y]) => x === df && y === dr)) continue;
+    const [target] = piecesAlong(after, m.from, df, dr, 1);
+    if (!target || target === m.to) continue;
+    const T = cellAt(after, target);
+    if (colorOf(T) === me) continue;
+    const check = typeOf(T) === 'k';
+    const hits = moverHits.filter((t) => t.sq !== target);
+    const captured = m.captured && !m.flags.includes('e')
+      ? (check ? SEE_VALUE[m.captured] : exchangeGain(grid, m)) : 0;
+    const moverGain = Math.max(captured, ...hits.map((t) => t.gain), 0);
+    // A discovered check lets the moved piece take or win what it hits; otherwise the opponent saves the bigger piece.
+    const gain = check ? moverGain : Math.min(captureGain(after, behind, target), moverGain);
+    if (gain < 1 || (best && best.gain >= gain)) continue;
+    const lines = [{ from: behind, to: target }];
+    const hit = hits.sort((x, y) => y.gain - x.gain)[0];
+    if (hit && hit.gain >= captured) lines.push({ from: m.to, to: hit.sq });
+    best = { lines, gain, key: `disc:${behind}${target}` };
+  }
+  return best;
+}
+
+// The move adds an attacker so that a defended piece, safe until now, can be won (attackers vs defenders).
+function detectPressure(grid, after, m, me) {
+  if (pieceAtRisk(after, m.to) > 0) return null;
+  const them = me === 'w' ? 'b' : 'w';
+  let best = null;
+  for (const sq of attacksFrom(after, m.to)) {
+    const p = cellAt(after, sq);
+    if (!p || colorOf(p) === me || typeOf(p) === 'k' || SEE_VALUE[typeOf(p)] < 3) continue;
+    const attackers = attackersOf(after, sq, me);
+    const defenders = attackersOf(after, sq, them);
+    if (attackers.length < 2 || !defenders.length) continue;
+    if (bestCaptureOn(grid, sq, me).gain > 0) continue;  // already winnable: this move isn't what does it
+    const gain = bestCaptureOn(after, sq, me).gain;
+    if (gain < 1 || (best && best.gain >= gain)) continue;
+    best = {
+      lines: [
+        ...attackers.filter((x) => x !== m.to).map((x) => ({ from: x, to: sq })),
+        { from: m.to, to: sq },
+        ...defenders.map((x) => ({ from: x, to: sq, dash: true })),
+      ],
+      gain,
+      key: `pressure:${sq}`,
+    };
+  }
+  return best;
+}
+
+// Capturing a piece that guarded another, which can then be won.
+function detectRemoval(grid, after, m, me) {
+  if (!m.captured || m.flags.includes('e')) return null;
+  const first = exchangeGain(grid, m);
+  if (first < 0) return null;
+  let best = null;
+  for (const sq of attacksFrom(grid, m.to)) {
+    const T = cellAt(grid, sq);
+    if (!T || colorOf(T) === me || typeOf(T) === 'k' || SEE_VALUE[typeOf(T)] < 3) continue;
+    if (bestCaptureOn(grid, sq, me).gain >= 2) continue;  // already winnable: nothing needed removing
+    const next = bestCaptureOn(after, sq, me);
+    if (next.gain < 2 || (best && best.gain >= next.gain + first)) continue;
+    best = { lines: [{ from: next.from, to: sq, dash: true }], gain: next.gain + first, key: `removal:${sq}` };
+  }
+  return best;
+}
+
+// Every tactical idea for the side to move, whatever the settings:
+// [{ from, to, cost, kinds: [...], extra: { kind: { lines, gain, key, safe } } }].
+const FORCING_KINDS = new Set(['check', 'queen', 'capture']);
 const tacticsCache = new Map();
-function tactics(fen) {
+function tacticMoves(fen) {
   if (tacticsCache.has(fen)) return tacticsCache.get(fen);
   const found = new Map();  // keyed by from+to, so the four promotions count once
   if (chess.load(fen)) {
     const me = chess.turn();
+    const them = me === 'w' ? 'b' : 'w';
     const grid = fenGrid(fen);
-    const queens = findPieces('q', me === 'w' ? 'b' : 'w');
+    const queens = findPieces('q', them);
     // Pieces already hitting the queen don't count as new attacks.
     const before = new Set(queens.flatMap((q) => attackersOf(grid, q, me)));
     for (const m of chess.moves({ verbose: true })) {
-      let kind = m.san.endsWith('#') ? 'mate' : m.san.endsWith('+') ? 'check' : null;
-      if (!kind && queens.length && m.captured !== 'q') {
-        // What hits the queen once the move is made, discovered attacks included.
-        const after = playOnGrid(grid, m);
-        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) kind = 'queen';
+      const after = playOnGrid(grid, m);
+      const safe = pieceAtRisk(after, m.to) <= 0;
+      const extra = {};
+      const note = (kind, info) => { if (info) extra[kind] = info; };
+      if (m.san.endsWith('#')) note('mate', { lines: [], gain: 1000, key: `mate:${m.from}${m.to}` });
+      else if (m.san.endsWith('+')) note('check', { lines: [], gain: 0, key: `check:${m.from}${m.to}`, safe });
+      if (m.captured) {
+        note('capture', { lines: [], gain: 0, key: `capture:${m.from}${m.to}`, safe });
+        if (!m.flags.includes('e')) {
+          const defended = attackersOf(after, m.to, them).length > 0;
+          if (!defended && SEE_VALUE[m.captured] >= 3) {
+            note('hanging', { lines: [], gain: SEE_VALUE[m.captured], key: `win:${m.to}` });
+          } else if (defended) {
+            const gain = exchangeGain(grid, m);
+            if (gain >= 1) note('trade', { lines: [], gain, key: `win:${m.to}` });
+          }
+        }
       }
-      if (!kind && m.captured) kind = 'capture';
+      if (queens.length && m.captured !== 'q' && SEE_VALUE[m.piece] < 9) {
+        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) {
+          note('queen', { lines: [], gain: 0, key: `queen:${m.from}${m.to}`, safe });
+        }
+      }
+      note('fork', detectFork(after, m, me));
+      const line = detectLine(after, m, me);
+      note('pin', line.pin);
+      note('skewer', line.skewer);
+      note('discovered', detectDiscovered(grid, after, m, me));
+      note('pressure', detectPressure(grid, after, m, me));
+      note('removal', detectRemoval(grid, after, m, me));
+      const kinds = Object.keys(extra);
+      if (!kinds.length) continue;
       const key = m.from + m.to;
-      if (kind && !(TACTIC_RANK[found.get(key)?.kind] >= TACTIC_RANK[kind])) {
-        found.set(key, { from: m.from, to: m.to, kind });
+      const old = found.get(key);
+      if (old) {
+        for (const k of kinds) if (!old.extra[k]) { old.extra[k] = extra[k]; old.kinds.push(k); }
+      } else {
+        found.set(key, { from: m.from, to: m.to, cost: SEE_VALUE[m.piece], kinds, extra });
       }
     }
   }
@@ -929,55 +1293,151 @@ function tactics(fen) {
   return result;
 }
 
-// ---------- key tactics ----------
-// The tactics worth a glance, chess.com style, found by rules on the board rather than
-// the engine, so they keep up with a fast live game with or without it. A material
-// search of its own tries each move, every reply to it, then checks and captures until
-// the exchanges settle, and keeps the moves that win at least KEY_GAIN or mate (in one
-// or two). Each is then named by how the material falls.
-// [{ from, to, kind, targets, support }], kind being 'mate', 'hanging', 'trade' or a
-// motif ('fork', 'pin', 'skewer', 'discovered', 'win'); `targets` are the squares it
-// hits, `support` the [from, to] lines that make it work (the pieces guarding the square
-// it lands on, the line it uncovers or pins along). Best first, at most KEY_MAX.
-const KEY_GAIN = 2;
-const KEY_MAX = 3;
+// Which of two candidate arrows is worth more: more material first, then the stronger kind, then the cheaper piece.
+function strongerTactic(a, b) {
+  if (a.gain !== b.gain) return a.gain > b.gain;
+  if (TACTIC_RANK[a.kind] !== TACTIC_RANK[b.kind]) return TACTIC_RANK[a.kind] > TACTIC_RANK[b.kind];
+  return a.cost < b.cost;
+}
+
+// What to draw for the side to move in `fen`: a mate if there is one (and nothing else), otherwise the
+// `max` ideas that win the most, each idea once and each move once with its most valuable kind. When
+// nothing wins material, one safe forcing move (check, attack on the queen, capture) may be offered.
+// Every winning idea has to stand up to the opponent's best reply (see forcedWins()), which also
+// turns up the mates in two the rules above don't see.
+function tactics(fen, { max = 3, forcing = true } = {}) {
+  const verdict = forcedWins(fen);
+  const ideas = new Map();
+  const consider = (c) => {
+    if (!ideas.has(c.key) || strongerTactic(c, ideas.get(c.key))) ideas.set(c.key, c);
+  };
+  for (const t of tacticMoves(fen)) {
+    let best = null;
+    for (const kind of t.kinds) {
+      if (!state.opts[TACTIC_OPT[kind]]) continue;
+      const info = t.extra[kind];
+      if (FORCING_KINDS.has(kind) && !info.safe) continue;
+      let gain = info.gain;
+      if (!FORCING_KINDS.has(kind)) {
+        gain = verdict.gainOf(t.from + t.to);
+        if (gain === null) continue;   // the reply refutes it
+        if (gain === undefined) gain = info.gain;   // not checked in time: the rules decide
+      }
+      const c = { from: t.from, to: t.to, cost: t.cost, kind, lines: info.lines, gain, key: info.key };
+      if (!best || strongerTactic(c, best)) best = c;
+    }
+    if (best) consider(best);
+  }
+  if (state.opts.tMate) {
+    const grid = fenGrid(fen);
+    for (const [move, gain] of verdict.wins) {
+      if (gain !== MATE_IN_TWO) continue;
+      const from = move.slice(0, 2);
+      const to = move.slice(2, 4);
+      consider({ from, to, cost: SEE_VALUE[typeOf(cellAt(grid, from))], kind: 'mate', lines: [], gain, key: `mate:${move}` });
+    }
+  }
+  const all = [...ideas.values()].sort((a, b) => (strongerTactic(a, b) ? -1 : 1));
+  const mates = all.filter((c) => c.kind === 'mate');
+  if (mates.length) return withBackup(fen, mates.slice(0, 2));
+  const winning = all.filter((c) => !FORCING_KINDS.has(c.kind) && c.gain >= 1).slice(0, max);
+  if (winning.length || !forcing) return withBackup(fen, winning);
+  return all.filter((c) => FORCING_KINDS.has(c.kind)).slice(0, 1);
+}
+
+// Adds to each idea's lines the pieces backing it up: ours guarding the square the move lands
+// on, when the opponent attacks it (the queen behind a forking bishop, say).
+const BACKED_KINDS = new Set(['mate', 'fork', 'skewer', 'pin', 'discovered', 'removal']);
+function withBackup(fen, picked) {
+  return picked.map((c) => {
+    if (!BACKED_KINDS.has(c.kind)) return c;
+    const extra = guardLines(fen, c.from, c.to).filter((g) => !c.lines.some((x) => x.from === g.from && x.to === g.to));
+    return extra.length ? { ...c, lines: [...c.lines, ...extra] } : c;
+  });
+}
+
+// The tactic the last move just carried out, if any (a fork, pin, skewer... now standing on the board):
+// { kind, lines } for the most valuable enabled one.
+function lastMoveTactic(idx) {
+  const plies = state.game?.plies;
+  const ply = plies?.[idx];
+  const prev = plies?.[idx - 1];
+  if (!ply?.lm || !prev) return null;
+  const uci = castleFix(prev.fen, ply.lm);
+  const t = tacticMoves(prev.fen).find((x) => x.from === uci.slice(0, 2) && x.to === uci.slice(2, 4));
+  if (!t || forcedWins(prev.fen).gainOf(t.from + t.to) === null) return null;
+  let best = null;
+  for (const kind of ['fork', 'skewer', 'discovered', 'pin', 'pressure', 'removal']) {
+    const info = t.extra[kind];
+    if (!info || !state.opts[TACTIC_OPT[kind]]) continue;
+    if (!best || info.gain > best.gain) best = { kind, lines: info.lines, gain: info.gain };
+  }
+  return best;
+}
+
+// Zwischenzug: our piece was just captured and we can take back, but the engine's best move is
+// something else first, with the recapture coming on our following move.
+// { from, to, later } (later: the delayed recapture, as UCI), or null.
+function zwischenzug(idx) {
+  const plies = state.game?.plies;
+  const ply = plies?.[idx];
+  const prev = plies?.[idx - 1];
+  if (!ply?.lm || !prev) return null;
+  const sq = castleFix(prev.fen, ply.lm).slice(2, 4);
+  const victim = cellAt(fenGrid(prev.fen), sq);
+  const me = ply.fen.split(' ')[1];
+  if (!victim || colorOf(victim) !== me) return null;
+  const best = evals.get(ply.fen)?.lines[0];
+  if (!best || best.depth < 10 || best.pv.length < 3) return null;
+  const [first, , later] = best.pv;
+  if (first.slice(2, 4) === sq || later.slice(2, 4) !== sq) return null;
+  if (!chess.load(ply.fen) || !chess.moves({ verbose: true }).some((m) => m.to === sq)) return null;
+  return { from: first.slice(0, 2), to: first.slice(2, 4), later };
+}
+
+// ---------- checking tactics against the reply ----------
+// The rules above look one move deep. Before a winning idea is drawn it has to stand up to
+// the opponent's best answer, checked by a material search of its own (no engine, so it keeps
+// up with a fast live game): the move, every reply to it, then checks and captures until the
+// exchanges settle. The same search turns up mates in two.
 const MATE = 1000;
+const MATE_IN_TWO = MATE - 1;
 const Q_DEPTH = 8;            // plies of captures, enough to settle an exchange on one square
-const NODE_BUDGET = 40000;    // per pass, so a wild position can't stall the board
+const NODE_BUDGET = 40000;    // per position, so a wild one can't stall the board
 const OUT_OF_NODES = {};
-const LINES = [1, 16, 15, 17];   // 0x88 steps along a rank, a file and the two diagonals
 const STEPS = { n: [33, 31, 18, 14, -14, -18, -31, -33], k: [1, 15, 16, 17, -1, -15, -16, -17] };
 const RAYS = { b: [15, 17, -15, -17], r: [1, 16, -1, -16], q: [1, 15, 16, 17, -1, -15, -16, -17] };
 const TYPE = {};
 for (const t of 'pnbrqk') TYPE[t] = TYPE[t.toUpperCase()] = t;
-const keyCache = new Map();
-let keyNodes = 0;
+let searchNodes = 0;
 
-const sqIndex = (sq) => (+sq[1] - 1) * 16 + sq.charCodeAt(0) - 97;
-const sqName = (s) => FILES[s & 7] + ((s >> 4) + 1);
+// Squares on the search's 0x88 board: index = rank * 16 + file.
+const idx88 = (sq) => (+sq[1] - 1) * 16 + sq.charCodeAt(0) - 97;
+const sq88 = (s) => FILES[s & 7] + ((s >> 4) + 1);
 const sideOf = (p) => (p < 'a' ? 'w' : 'b');
 const otherSide = (c) => (c === 'w' ? 'b' : 'w');
 const own = (pos) => (pos.side === 'w' ? pos.mat : -pos.mat);
 const slides = (type, d) => type === 'q' || type === (Math.abs(d) === 1 || Math.abs(d) === 16 ? 'r' : 'b');
 
-// `recap` is what the last move took ({ sq, value }): taking it back is just the
-// exchange going on, not a tactic.
-function keyTactics(fen, recap = null) {
-  const key = recap ? `${fen}|${recap.sq}${recap.value}` : fen;
-  if (keyCache.has(key)) return keyCache.get(key);
-  const result = [];
+// What each move wins by force: { wins, gainOf }. `wins` maps from+to to the pawns it wins
+// (MATE for mate in one, MATE_IN_TWO for a mate in two) for the moves that win something;
+// gainOf(from+to) gives that, null if the move wins nothing, or undefined if the search ran
+// out of time before getting to it. A quiet move only counts if it wins more than the side
+// to move wins anyway (threats the opponent can't parry even with a free move).
+const winsCache = new Map();
+function forcedWins(fen) {
+  if (winsCache.has(fen)) return winsCache.get(fen);
+  const wins = new Map();
+  const checked = new Set();
   if (chess.load(fen)) {
     const roots = chess.moves({ verbose: true });
     const inCheck = chess.in_check();
-    const pos = keyBoard(fen);
+    const pos = board88(fen);
     const us = pos.side;
     const base = own(pos);
-    const winners = [];
-    let free = 0;
-    keyNodes = 0;
+    searchNodes = 0;
     try {
-      // What we win whatever we play: threats the opponent can't parry even with a free
-      // move. A quiet move only counts if it wins more than that.
+      let free = 0;
       if (!inCheck) {
         const ep = pos.ep;
         pos.side = otherSide(us);
@@ -988,197 +1448,48 @@ function keyTactics(fen, recap = null) {
       }
       for (const rm of roots) {
         if (rm.promotion && rm.promotion !== 'q') continue;
-        const m = { from: sqIndex(rm.from), to: sqIndex(rm.to), promo: rm.promotion, ep: rm.flags.includes('e') };
+        const key = rm.from + rm.to;
         if (rm.san.endsWith('#')) {
-          winners.push({ rm, m, gain: MATE });
-          continue;
+          wins.set(key, MATE);
+        } else if (free < MATE / 2) {   // else mate comes anyway: only the mating moves count
+          const need = base + 1 + (rm.captured ? 0 : free);
+          const m = { from: idx88(rm.from), to: idx88(rm.to), promo: rm.promotion, ep: rm.flags.includes('e') };
+          const u = makeMove(pos, m);
+          const score = -bestReply(pos, -MATE, 1 - need);
+          unmakeMove(pos, u);
+          if (score >= need) wins.set(key, score >= MATE / 2 ? MATE_IN_TWO : score - base);
         }
-        if (free >= MATE / 2) continue;   // mate comes anyway: only the mating moves count
-        const need = base + KEY_GAIN + (rm.captured ? 0 : free);
-        const u = makeMove(pos, m);
-        const score = -bestReply(pos, -MATE, 1 - need);
-        unmakeMove(pos, u);
-        if (score >= need) winners.push({ rm, m, gain: score - base });
+        checked.add(key);
       }
     } catch (err) {
-      if (err !== OUT_OF_NODES) throw err;   // out of time: keep what was found
-    }
-
-    // Name the best few: the move that wins most, then the cheapest piece; one arrow per
-    // target square and kind. Captures that win on the spot are named first, since a
-    // fancier move that only wins the same piece (an in-between check, say) adds nothing.
-    winners.sort((a, b) => b.gain - a.gain || VALUE[a.rm.piece] - VALUE[b.rm.piece]);
-    const direct = new Map();   // square taken -> what taking it wins
-    for (const w of winners) {
-      if (!w.rm.captured || w.gain >= MATE / 2) continue;
-      const u = makeMove(pos, w.m);
-      w.kind = onTheSpot(pos, w.m, w.rm);
-      unmakeMove(pos, u);
-      if (w.kind && !direct.has(w.m.to)) direct.set(w.m.to, w.gain);
-    }
-    // With a mate on the board, winning material is beside the point.
-    const mating = winners.length > 0 && winners[0].gain >= MATE / 2;
-    keyNodes = 0;
-    try {
-      for (const w of winners) {
-        if (result.length === KEY_MAX || (mating && w.gain < MATE / 2)) break;
-        if (recap && w.rm.to === recap.sq && w.gain <= recap.value) continue;
-        const u = makeMove(pos, w.m);
-        let t = null;
-        if (w.gain >= MATE / 2) {
-          t = { kind: 'mate', targets: [], support: guards(pos, w.m.to) };
-        } else if (w.kind) {
-          t = { kind: w.kind, targets: [], support: [] };
-        } else if (!w.rm.captured || w.gain - free >= KEY_GAIN) {   // else it only cashes in what was already won
-          t = motif(pos, w.m);
-          const same = t.won >= 0 ? direct.get(t.won) : Math.max(-1, ...direct.values());
-          if (same !== undefined && same >= w.gain - 1) t = null;
-          else if (t.kind !== 'win') t.support.unshift(...guards(pos, w.m.to));
-        }
-        unmakeMove(pos, u);
-        if (!t || result.some((r) => r.to === w.rm.to && r.kind === t.kind)) continue;
-        result.push({
-          from: w.rm.from, to: w.rm.to, kind: t.kind, targets: t.targets.map(sqName),
-          support: t.support.map(([a, c]) => [sqName(a), sqName(c)]),
-        });
-      }
-    } catch (err) {
-      if (err !== OUT_OF_NODES) throw err;
+      if (err !== OUT_OF_NODES) throw err;   // out of time: the rest goes unchecked
     }
   }
-  if (keyCache.size > 2000) keyCache.clear();
-  keyCache.set(key, result);
-  return result;
+  const verdict = { wins, gainOf: (move) => (wins.has(move) ? wins.get(move) : checked.has(move) ? null : undefined) };
+  if (winsCache.size > 2000) winsCache.clear();
+  winsCache.set(fen, verdict);
+  return verdict;
 }
 
-// Our pieces guarding square s when the opponent (to move) attacks it: what keeps the
-// piece that just landed there from simply being taken. [[from, s], ...]
-function guards(pos, s) {
-  const us = otherSide(pos.side);
-  return isAttacked(pos.b, s, pos.side) ? attackersOn(pos.b, s, us).map((d) => [d, s]) : [];
-}
-
-// A capture that wins at least KEY_GAIN on the spot, judged right after it: 'hanging'
-// if nothing can take back, 'trade' if the exchange that follows still leaves that much
-// (a cheaper piece taking a dearer one, or more attackers than defenders); else null.
-function onTheSpot(pos, m, rm) {
-  const back = canTakeOn(pos, m.to);
-  const lost = back ? Math.max(0, exchange(pos.b, m.to, pos.side)) : 0;
-  if (VALUE[rm.captured] - lost < KEY_GAIN) return null;
-  return back ? 'trade' : 'hanging';
-}
-
-// How a winning move wins, judged on the board right after it (the opponent to move):
-// { kind, targets, won }, `won` being the square of what the line ends up taking (-1 if
-// unclear). The motif is named after how that piece falls.
-function motif(pos, m) {
-  const { b } = pos;
-  const them = pos.side;
-  const us = otherSide(them);
-  const take = principal(pos);
-  // Only a piece already standing there counts (or the opponent's piece that took ours
-  // on the mover's square); a piece that only arrives with the reply muddles the picture.
-  const won = take && (take.to === m.to || (b[take.to] && sideOf(b[take.to]) === them)) ? take.to : -1;
-  const wonList = won >= 0 ? [won] : [];
-
-  // Discovered check: one of our line pieces now sees the king through the square the mover left.
-  const king = pos.king[them];
-  const kd = lineDir(king, m.from);
-  const s = kd ? firstOnLine(b, king, kd) : -1;
-  if (s >= 0 && s !== m.to && sideOf(b[s]) === us && slides(TYPE[b[s]], kd) && between(king, s, m.from)) {
-    return { kind: 'discovered', targets: [king, ...wonList.filter((x) => x !== king)], won, support: [[s, king]] };
-  }
-
-  // Enemy pieces worth hitting: the king, anything worth more than the attacker, and
-  // anything with no defender but the other pieces under attack.
-  const mover = TYPE[b[m.to]];
-  const attacked = attacksFrom(b, m.to).filter((sq) => b[sq] && sideOf(b[sq]) === them);
-  const hits = attacked.filter((sq) => TYPE[b[sq]] === 'k' || VALUE[TYPE[b[sq]]] > VALUE[mover] ||
-    attackersOn(b, sq, them).every((d) => attacked.includes(d)));
-  // A fork wins one of the pieces it hits, or makes the opponent give something up for
-  // the forking piece, which we then retake on its square.
-  if (hits.length >= 2 && (hits.includes(won) || won === m.to)) return { kind: 'fork', targets: hits, won, support: [] };
-  if (take && take.from === m.to) {
-    // Along the mover's lines: a big piece (or the king) forced aside from what's behind it
-    // is a skewer; a piece that can't move, or exposes something bigger if it does, is pinned.
-    for (const dir of RAYS[mover] || []) {
-      const front = firstOnLine(b, m.to, dir);
-      if (front < 0 || sideOf(b[front]) !== them) continue;
-      const back = firstOnLine(b, front, dir);
-      if (back < 0 || sideOf(b[back]) !== them || (won !== front && won !== back)) continue;
-      const f = TYPE[b[front]];
-      const k = TYPE[b[back]];
-      const line = [[m.to, back]];
-      if (won === back && (f === 'k' || VALUE[f] > VALUE[k])) return { kind: 'skewer', targets: [front, back], won, support: line };
-      if (k === 'k' || VALUE[k] > VALUE[f]) return { kind: 'pin', targets: [front, back], won, support: line };
-    }
-  } else if (take && won >= 0 && between(take.from, won, m.from)) {
-    return { kind: 'discovered', targets: [won, ...hits.filter((x) => x !== won)], won, support: [[take.from, won]] };
-  }
-  // Piling up on a piece that's already pinned.
-  const pin = won >= 0 ? pinnedTo(b, won, us) : null;
-  if (pin) return { kind: 'pin', targets: [won, pin.behind], won, support: [[pin.pinner, pin.behind]] };
-  return { kind: 'win', targets: wonList, won, support: [] };
-}
-
-// The line behind a winning move, the opponent to move: their best reply, then the
-// capture we answer it with (null if we'd rather not capture, or check first).
-function principal(pos) {
-  let reply = null;
-  let best = -Infinity;
-  for (const m of genMoves(pos, false)) {
-    const u = makeMove(pos, m);
-    if (leavesKingSafe(pos, u)) {
-      const score = -quiesce(pos, -MATE, -best, Q_DEPTH, true);
-      if (score > best) {
-        best = score;
-        reply = m;
-      }
-    }
-    unmakeMove(pos, u);
-  }
-  if (!reply) return null;
-  const u = makeMove(pos, reply);
-  const check = isAttacked(pos.b, pos.king[pos.side], u.side);
-  let top = check ? -Infinity : standPat(pos);
-  let take = null;
-  for (const m of genMoves(pos, false)) {
-    const v = makeMove(pos, m);
-    if (leavesKingSafe(pos, v) && (check || m.victim || m.promo || givesCheck(pos, v))) {
-      const score = -quiesce(pos, -MATE, -top, Q_DEPTH - 1, false);
-      if (score > top) {
-        top = score;
-        take = v.captured ? m : null;
-      }
-    }
-    unmakeMove(pos, v);
-  }
+// Our pieces guarding the square a move lands on, when the opponent attacks it there:
+// [{ from, to }] lines.
+function guardLines(fen, from, to) {
+  const pos = board88(fen);
+  const s = idx88(from);
+  const t = idx88(to);
+  const p = pos.b[s];
+  if (!p || sideOf(p) !== pos.side) return [];
+  const pawn = TYPE[p] === 'p';
+  const u = makeMove(pos, { from: s, to: t, ep: pawn && (s & 7) !== (t & 7) && !pos.b[t], promo: pawn && (t >> 4) % 7 === 0 ? 'q' : undefined });
+  const lines = isAttacked(pos.b, t, pos.side) ? attackersOn(pos.b, t, u.side).map((d) => ({ from: sq88(d), to })) : [];
   unmakeMove(pos, u);
-  return take;
+  return lines;
 }
 
-// The step from a toward c along a rank, file or diagonal, or 0 if they don't line up.
-function lineDir(a, c) {
-  const df = (c & 7) - (a & 7);
-  const dr = (c >> 4) - (a >> 4);
-  if (!df && !dr) return 0;
-  if (!dr) return Math.sign(df);
-  if (!df) return 16 * Math.sign(dr);
-  return Math.abs(df) === Math.abs(dr) ? 16 * Math.sign(dr) + Math.sign(df) : 0;
-}
-
-// Is x strictly between a and c on a line?
-function between(a, c, x) {
-  const d = lineDir(a, c);
-  if (!d) return false;
-  for (let t = a + d; t !== c && !(t & 0x88); t += d) if (t === x) return true;
-  return false;
-}
-
-// A 0x88 board (index = rank * 16 + file), with material counted White minus Black.
-function keyBoard(fen) {
+// The search's board for `fen`, with material counted White minus Black.
+function board88(fen) {
   const [placement, side, , ep] = fen.split(' ');
-  const pos = { b: new Array(128).fill(null), side, ep: ep && ep !== '-' ? sqIndex(ep) : -1, king: {}, mat: 0 };
+  const pos = { b: new Array(128).fill(null), side, ep: ep && ep !== '-' ? idx88(ep) : -1, king: {}, mat: 0 };
   placement.split('/').forEach((row, i) => {
     let f = 0;
     for (const ch of row) {
@@ -1219,6 +1530,11 @@ function isAttacked(b, s, by) {
   return false;
 }
 
+function firstOnLine(b, s, d) {
+  for (let t = s + d; !(t & 0x88); t += d) if (b[t]) return t;
+  return -1;
+}
+
 // Squares of `by`'s pieces that attack square s.
 function attackersOn(b, s, by) {
   const out = [];
@@ -1233,48 +1549,6 @@ function attackersOn(b, s, by) {
     if (t >= 0 && sideOf(b[t]) === by && slides(TYPE[b[t]], d)) out.push(t);
   }
   return out;
-}
-
-// Squares the piece on s attacks.
-function attacksFrom(b, s) {
-  const p = b[s];
-  const type = TYPE[p];
-  const out = [];
-  if (type === 'p') {
-    const ahead = s + (p < 'a' ? 16 : -16);
-    for (const t of [ahead - 1, ahead + 1]) if (!(t & 0x88)) out.push(t);
-  } else if (STEPS[type]) {
-    for (const d of STEPS[type]) if (!((s + d) & 0x88)) out.push(s + d);
-  } else {
-    for (const d of RAYS[type]) {
-      for (let t = s + d; !(t & 0x88); t += d) {
-        out.push(t);
-        if (b[t]) break;
-      }
-    }
-  }
-  return out;
-}
-
-function firstOnLine(b, s, d) {
-  for (let t = s + d; !(t & 0x88); t += d) if (b[t]) return t;
-  return -1;
-}
-
-// The enemy piece on s pinned by one of our line pieces: { pinner, behind } (what it's
-// pinned to), or null.
-function pinnedTo(b, s, us) {
-  for (const d of LINES) {
-    for (const dir of [d, -d]) {
-      const pinner = firstOnLine(b, s, dir);
-      const behind = firstOnLine(b, s, -dir);
-      if (pinner < 0 || behind < 0 || sideOf(b[pinner]) !== us || sideOf(b[behind]) === us) continue;
-      if (!slides(TYPE[b[pinner]], dir)) continue;
-      const k = TYPE[b[behind]];
-      if (k === 'k' || VALUE[k] > VALUE[TYPE[b[s]]]) return { pinner, behind };
-    }
-  }
-  return null;
 }
 
 // Pseudo-legal moves for the side to move, captures first (the most valuable victim,
@@ -1394,7 +1668,7 @@ function standPat(pos) {
     }
     const p = b[s];
     if (!p || sideOf(p) !== pos.side || TYPE[p] === 'k' || !isAttacked(b, s, them)) continue;
-    const g = exchange(b, s, them);
+    const g = exchangeOn(b, s, them);
     if (g > first) {
       second = first;
       first = g;
@@ -1407,7 +1681,7 @@ function standPat(pos) {
 
 // What `by` nets by starting captures on square s, both sides recapturing with their
 // cheapest piece while it pays (x-rays count, pins don't).
-function exchange(b, s, by) {
+function exchangeOn(b, s, by) {
   const gain = [VALUE[TYPE[b[s]]]];
   const lifted = [];
   let side = by;
@@ -1449,22 +1723,10 @@ function cheapestAttacker(b, s, by) {
   return -1;
 }
 
-// Can the side to move legally take on square s?
-function canTakeOn(pos, s) {
-  for (const m of genMoves(pos, true)) {
-    if (m.to !== s) continue;
-    const u = makeMove(pos, m);
-    const ok = leavesKingSafe(pos, u);
-    unmakeMove(pos, u);
-    if (ok) return true;
-  }
-  return false;
-}
-
-// The opponent's turn after a candidate move: every legal reply, then captures.
+// The opponent's turn after a candidate move: every legal reply, then checks and captures.
 // Scores are material for the side to move.
 function bestReply(pos, alpha, beta) {
-  if (++keyNodes > NODE_BUDGET) throw OUT_OF_NODES;
+  if (++searchNodes > NODE_BUDGET) throw OUT_OF_NODES;
   let best = -MATE;
   let moved = false;
   for (const m of genMoves(pos, false)) {
@@ -1488,7 +1750,7 @@ function bestReply(pos, alpha, beta) {
 // fork with check, a mate in two), and stopping has to reckon with whatever that reply
 // set up to take next (a fork of its own, say).
 function quiesce(pos, alpha, beta, depth, wary) {
-  if (++keyNodes > NODE_BUDGET) throw OUT_OF_NODES;
+  if (++searchNodes > NODE_BUDGET) throw OUT_OF_NODES;
   const check = isAttacked(pos.b, pos.king[pos.side], otherSide(pos.side));
   let best = -MATE;
   if (!check) {
@@ -1599,7 +1861,7 @@ function render() {
   renderBars(ply, idx);
   renderMoves(idx);
   renderMeta();
-  drawArrows(ply, renderAnalysis(ply, idx), idx > 0 ? game.plies[idx - 1] : null);
+  drawArrows(ply, renderAnalysis(ply, idx));
   renderWorst(idx);
   renderTally();
   syncSections();
@@ -1624,7 +1886,8 @@ function renderControls() {
   el.tacticsToggle.classList.toggle('on', state.opts.tactics);
   el.legend.hidden = !state.opts.tactics;
   el.legend.classList.toggle('threats', state.opts.threats);
-  el.legend.classList.toggle('simple', state.opts.simple);
+  for (const item of el.legend.querySelectorAll('[data-kind]')) item.hidden = !state.opts[TACTIC_OPT[item.dataset.kind]];
+  el.subopts.classList.toggle('off', !state.opts.tactics);
   for (const input of el.settings.querySelectorAll('[data-opt]')) {
     const v = state.opts[input.dataset.opt];
     if (input.type === 'checkbox') input.checked = !!v;
@@ -1714,36 +1977,48 @@ function dropLabel(best, alt, s) {
   return d < 0.05 ? '0.0' : `-${d.toFixed(d >= 10 ? 0 : 1)}`;
 }
 
-// The worst move of the game so far as a little board that jumps there when clicked.
+// Every blunder of the game so far, in move order, each as a little board that jumps there when clicked.
+function blunderMoves() {
+  const plies = state.game?.plies || [];
+  const out = [];
+  for (let i = 1; i < plies.length; i++) if (plies[i] && plies[i - 1] && classify(i) === 'blunder') out.push(i);
+  return out;
+}
+
+function blunderCard(i, idx) {
+  const game = state.game;
+  const prev = game.plies[i - 1];
+  const cur = game.plies[i];
+  const better = evals.get(prev.fen)?.lines[0];
+  const color = prev.fen.split(' ')[1] === 'w' ? 'white' : 'black';
+  const name = game.info?.players?.[color]?.user?.name || cap(color);
+  return `<button class="worst-card${idx === i ? ' cur' : ''}" data-ply="${i}" title="Show this move on the board">` +
+    miniBoardHtml(cur.fen, cur.lm, castleFix(prev.fen, cur.lm).slice(2, 4), 'blunder') +
+    '<span class="worst-info">' +
+    `<span><span class="sym k-blunder">${KINDS.blunder.sym}</span> <b>${esc(moveLabel(i))}</b></span>` +
+    `<span class="muted">${esc(name)}</span>` +
+    `<span>${evalText(prev.fen)} → ${evalText(cur.fen)}</span>` +
+    (better ? `<span class="muted">Best was <b>${esc(toSan(prev.fen, better.pv[0]))}</b></span>` : '') +
+    '</span></button>';
+}
+
 let worstHtml = '';
 function renderWorst(idx) {
   const game = state.game;
   let html = '';
+  let count = 0;
   if (game && state.opts.worst && canAnalyse(game) && game.plies.length > 1) {
-    const w = worstMove();
-    if (!w) {
-      html = '<p class="worst-none">No inaccuracies or worse yet.</p>';
-    } else {
-      const prev = game.plies[w.i - 1];
-      const cur = game.plies[w.i];
-      const better = evals.get(prev.fen)?.lines[0];
-      const color = prev.fen.split(' ')[1] === 'w' ? 'white' : 'black';
-      const name = game.info?.players?.[color]?.user?.name || cap(color);
-      html =
-        `<button class="worst-card${idx === w.i ? ' cur' : ''}" data-ply="${w.i}" title="Show this move on the board">` +
-        miniBoardHtml(cur.fen, cur.lm, castleFix(prev.fen, cur.lm).slice(2, 4), w.kind) +
-        '<span class="worst-info">' +
-        `<span><span class="sym k-${w.kind}">${KINDS[w.kind].sym}</span> <b>${esc(moveLabel(w.i))}</b></span>` +
-        `<span class="muted">${esc(name)} · ${KINDS[w.kind].word.toLowerCase()}</span>` +
-        `<span>${evalText(prev.fen)} → ${evalText(cur.fen)}</span>` +
-        (better ? `<span class="muted">Best was <b>${esc(toSan(prev.fen, better.pv[0]))}</b></span>` : '') +
-        '</span></button>';
-    }
+    const list = blunderMoves();
+    count = list.length;
+    html = count
+      ? `<div class="worst-list">${list.map((i) => blunderCard(i, idx)).join('')}</div>`
+      : '<p class="worst-none">No blunders yet.</p>';
   }
   if (html !== worstHtml) {
     el.worst.innerHTML = html;
     worstHtml = html;
   }
+  el.worstTitle.textContent = count ? `Blunder previews (${count})` : 'Blunder previews';
 }
 
 function miniBoardHtml(fen, lm, hit, kind) {
@@ -1831,15 +2106,14 @@ function tallyHtml() {
 }
 
 const BEST_COLOR = '#2f7fd8';
-const MOTIF_COLOR = '#a24bd1';
 const TACTIC_COLOR = {
-  hanging: '#e58f2a', trade: '#2e9d57', capture: '#e58f2a', queen: MOTIF_COLOR, check: '#d6352b', mate: '#d6352b',
-  fork: MOTIF_COLOR, pin: MOTIF_COLOR, skewer: MOTIF_COLOR, discovered: MOTIF_COLOR, win: MOTIF_COLOR,
+  mate: '#8e1b1b', fork: '#e91e63', skewer: '#3949ab', hanging: '#e58f2a', removal: '#6d4c41',
+  discovered: '#ef6c00', trade: '#2e9d57', pin: '#00a3a3', pressure: '#546e7a',
+  check: '#d6352b', queen: '#a24bd1', capture: '#6f6f78', zwischen: '#b8860b',
 };
 
-// Rings, then tactics with their thin support arrows (the opponent's threats lowest), engine
-// arrows on top, labels over everything. `prev` is the position before `ply`.
-function drawArrows(ply, engineArrows, prev) {
+// Tactics underneath (the opponent's threats lowest), engine arrows on top, labels over everything.
+function drawArrows(ply, engineArrows) {
   let svg = el.board.querySelector('svg.arrows');
   if (!svg) {
     svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1848,49 +2122,49 @@ function drawArrows(ply, engineArrows, prev) {
     el.board.appendChild(svg);
   }
   const list = [];
-  const rings = [];
-  const support = [];
   const variant = state.game?.info?.variant?.key || 'standard';
   if (state.opts.tactics && ply && ANALYSABLE.includes(variant) && !terminal(ply.fen)) {
-    const add = (fen, dash, recap) => {
-      for (const t of (state.opts.simple ? keyTactics(fen, recap) : tactics(fen))) {
+    const seen = new Set();  // one arrow per pair of squares, whoever draws it first
+    const push = (a) => {
+      if (a.from === a.to || seen.has(a.from + a.to)) return;
+      seen.add(a.from + a.to);
+      list.push(a);
+    };
+    const add = (picked, dash) => {
+      for (const t of picked) {
         const color = TACTIC_COLOR[t.kind];
-        const opacity = dash ? 0.55 : 0.85;
-        list.push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.1, opacity, dash });
-        // Thin arrows for what makes it work (the pieces guarding the square it lands on,
-        // the line it uncovers or pins along), rings on what it hits.
-        for (const [from, to] of t.support || []) support.push({ from, to, color, width: 0.05, opacity: opacity * 0.8, dash });
-        for (const sq of t.targets || []) rings.push({ sq, color, opacity, dash });
+        const opacity = dash ? 0.6 : 0.9;
+        push({ from: t.from, to: t.to, color, width: t.kind === 'mate' ? 0.14 : 0.11, opacity, dash });
+        // The idea behind the move: fork targets, the pinned line, the unmasked attacker, the defenders...
+        for (const x of t.lines) push({ from: x.from, to: x.to, color, width: 0.06, opacity: opacity * 0.85, dash: dash || x.dash });
       }
     };
-    // Passing the turn is meaningless while the side to move is in check.
-    if (state.opts.threats && !findCheckedKing(ply.fen)) add(passTurn(ply.fen), true, null);
-    add(ply.fen, false, lastCapture(prev, ply));
+    const idx = currentIndex();
+    const mine = tactics(ply.fen);
+    const mating = mine.some((t) => t.kind === 'mate');
+    if (!mating) {
+      // What the opponent's last move set up (a fork now on the board...), then what they threaten next.
+      const last = lastMoveTactic(idx);
+      if (last) {
+        const color = TACTIC_COLOR[last.kind];
+        for (const x of last.lines) push({ from: x.from, to: x.to, color, width: 0.07, opacity: 0.6, dash: true });
+      }
+      // Passing the turn is meaningless while the side to move is in check.
+      if (state.opts.threats && !findCheckedKing(ply.fen)) add(tactics(passTurn(ply.fen), { max: 2, forcing: false }), true);
+    }
+    add(mine, false);
+    if (!mating && state.opts.tZwischen && state.analysis) {
+      const z = zwischenzug(idx);
+      if (z) {
+        const color = TACTIC_COLOR.zwischen;
+        push({ from: z.from, to: z.to, color, width: 0.11, opacity: 0.9 });
+        push({ from: z.later.slice(0, 2), to: z.later.slice(2, 4), color, width: 0.06, opacity: 0.75, dash: true });
+      }
+    }
   }
   for (const a of engineArrows) list.push({ ...a, from: a.uci.slice(0, 2), to: a.uci.slice(2, 4) });
   const labels = [];
-  svg.innerHTML = rings.map(ringSvg).join('') + [...support, ...list].map((a) => arrowSvg(a, labels)).join('') +
-    labels.map((l) => l.svg).join('');
-}
-
-// What the move into `ply` took, as { sq, value }, or null.
-function lastCapture(prev, ply) {
-  if (!prev || !ply?.lm) return null;
-  const grid = fenGrid(prev.fen);
-  const at = (sq) => grid[8 - +sq[1]][sq.charCodeAt(0) - 97];
-  const from = ply.lm.slice(0, 2);
-  const to = ply.lm.slice(2, 4);
-  const mover = at(from);
-  const taken = at(to);
-  if (!mover) return null;
-  if (taken) return sideOf(taken) !== sideOf(mover) ? { sq: to, value: VALUE[TYPE[taken]] } : null;   // not castling
-  return TYPE[mover] === 'p' && from[0] !== to[0] ? { sq: to, value: 1 } : null;   // en passant
-}
-
-function ringSvg(r) {
-  const [x, y] = squareCenter(r.sq);
-  const dash = r.dash ? ' stroke-dasharray="0.14 0.1"' : '';
-  return `<circle cx="${x}" cy="${y}" r="0.42" fill="none" stroke="${r.color}" stroke-width="0.07" opacity="${r.opacity}"${dash}/>`;
+  svg.innerHTML = list.map((a) => arrowSvg(a, labels)).join('') + labels.map((l) => l.svg).join('');
 }
 
 function arrowSvg(a, labels) {
@@ -2153,6 +2427,252 @@ function go(idx, dir = -1) {
   scheduleRender();
 }
 
+// ---------- movable, resizable board ----------
+// Drag either player bar to move the board, drag the corner handle to resize it. The whole unit
+// (board, eval bar, clocks, arrows, badges) is moved and scaled by a CSS transform, so nothing
+// around it reflows. Position and size are remembered.
+
+// The board and the panels can overlap; whichever was touched last comes to the front.
+let zTop = 30;
+const bringToFront = (node) => { node.style.zIndex = String(++zTop); };
+
+const BOARD_KEY = 'livewatch.board';
+const BOARD_MIN_K = 0.4;
+const BOARD_MAX_K = 2.5;
+const boardBox = { x: 0, y: 0, k: 1 };
+const boardUnit = $('boardunit');
+
+function applyBoardBox() {
+  boardUnit.style.setProperty('--bx', `${boardBox.x}px`);
+  boardUnit.style.setProperty('--by', `${boardBox.y}px`);
+  boardUnit.style.setProperty('--bk', String(boardBox.k));
+  boardUnit.classList.toggle('moved', boardBox.x !== 0 || boardBox.y !== 0 || boardBox.k !== 1);
+}
+
+function saveBoardBox() {
+  try { localStorage.setItem(BOARD_KEY, JSON.stringify(boardBox)); } catch { /* optional */ }
+}
+
+// Keep a good part of the board on screen so it can always be grabbed again.
+function keepBoardReachable() {
+  const r = boardUnit.getBoundingClientRect();
+  const grab = Math.min(120, r.width / 2);
+  if (r.right < grab) boardBox.x += grab - r.right;
+  if (r.left > innerWidth - grab) boardBox.x -= r.left - (innerWidth - grab);
+  if (r.top + scrollY < 0) boardBox.y -= r.top + scrollY;
+}
+
+function resetBoardBox() {
+  Object.assign(boardBox, { x: 0, y: 0, k: 1 });
+  applyBoardBox();
+  saveBoardBox();
+}
+
+function initBoardUnit() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(BOARD_KEY) || 'null');
+    if (saved && [saved.x, saved.y, saved.k].every(Number.isFinite)) {
+      Object.assign(boardBox, { x: saved.x, y: saved.y, k: Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, saved.k)) });
+    }
+  } catch { /* optional */ }
+  applyBoardBox();
+  keepBoardReachable();
+  applyBoardBox();
+
+  let drag = null;
+  let lastPress = { t: 0, x: 0, y: 0 };
+  boardUnit.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (boardUnit.classList.contains('moved')) bringToFront(boardUnit);
+    const resize = e.target.closest('.boardresize');
+    if (!resize && !e.target.closest('.bar')) return;
+    e.preventDefault();
+    // Two quick presses in the same spot reset the board (pointer capture hides the browser's dblclick).
+    if (e.timeStamp - lastPress.t < 400 && Math.hypot(e.clientX - lastPress.x, e.clientY - lastPress.y) < 8) {
+      lastPress.t = 0;
+      resetBoardBox();
+      return;
+    }
+    lastPress = { t: e.timeStamp, x: e.clientX, y: e.clientY };
+    boardUnit.setPointerCapture(e.pointerId);
+    drag = {
+      mode: resize ? 'resize' : 'move', id: e.pointerId, sx: e.clientX, sy: e.clientY,
+      x: boardBox.x, y: boardBox.y, k: boardBox.k, w: boardUnit.offsetWidth,
+    };
+    boardUnit.classList.add(resize ? 'resizing' : 'dragging');
+    document.body.classList.add('moving');
+  });
+  boardUnit.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.sx;
+    const dy = e.clientY - drag.sy;
+    if (drag.mode === 'move') {
+      boardBox.x = drag.x + dx;
+      boardBox.y = drag.y + dy;
+    } else {
+      // The top-left corner stays put; the new width follows the pointer along the diagonal.
+      const width = Math.max(1, drag.k * drag.w + (dx + dy) / 2);
+      boardBox.k = Math.min(BOARD_MAX_K, Math.max(BOARD_MIN_K, width / drag.w));
+    }
+    applyBoardBox();
+  });
+  const end = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag = null;
+    boardUnit.classList.remove('dragging', 'resizing');
+    document.body.classList.remove('moving');
+    keepBoardReachable();
+    applyBoardBox();
+    saveBoardBox();
+  };
+  boardUnit.addEventListener('pointerup', end);
+  boardUnit.addEventListener('pointercancel', end);
+  $('boardReset').onclick = () => { resetBoardBox(); resetPanels(); };
+  addEventListener('resize', () => {
+    keepBoardReachable();
+    applyBoardBox();
+  });
+}
+
+// ---------- movable, resizable panels ----------
+// The analysis panel, the moves list and the control buttons each get a grip on their top edge
+// (drag to move) and a corner handle (drag to resize). Moving uses the CSS `translate` property, so
+// nothing reflows; resizing sets width and height. Everything is remembered.
+
+const PANELS_KEY = 'livewatch.panels';
+const PANEL_MIN = { w: 200, h: 140 };
+const panelBoxes = {};   // id -> { x, y, w, h } (w and h are null until the panel is resized)
+const panelEls = new Map();
+
+function applyPanel(id) {
+  const node = panelEls.get(id);
+  const box = panelBoxes[id];
+  node.style.setProperty('--px', `${box.x}px`);
+  node.style.setProperty('--py', `${box.y}px`);
+  node.style.width = box.w == null ? '' : `${box.w}px`;
+  node.style.height = box.h == null ? '' : `${box.h}px`;
+  node.classList.toggle('sized', box.w != null || box.h != null);
+}
+
+function savePanels() {
+  try { localStorage.setItem(PANELS_KEY, JSON.stringify(panelBoxes)); } catch { /* optional */ }
+}
+
+// Keep a good part of a panel on screen so it can always be grabbed again.
+function keepPanelReachable(id) {
+  const r = panelEls.get(id).getBoundingClientRect();
+  const box = panelBoxes[id];
+  const grab = Math.min(100, r.width / 2);
+  if (r.right < grab) box.x += grab - r.right;
+  if (r.left > innerWidth - grab) box.x -= r.left - (innerWidth - grab);
+  if (r.top + scrollY < 0) box.y -= r.top + scrollY;
+}
+
+function resetPanel(id) {
+  Object.assign(panelBoxes[id], { x: 0, y: 0, w: null, h: null });
+  applyPanel(id);
+  savePanels();
+}
+
+function resetPanels() {
+  for (const id of panelEls.keys()) resetPanel(id);
+}
+
+function initPanels() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(PANELS_KEY) || '{}') || {}; } catch { /* optional */ }
+  const num = (v) => (Number.isFinite(v) ? v : null);
+
+  for (const node of document.querySelectorAll('.panel[data-panel]')) {
+    const id = node.dataset.panel;
+    const widthOnly = node.dataset.size === 'width';
+    panelEls.set(id, node);
+    const sv = saved[id] || {};
+    panelBoxes[id] = {
+      x: num(sv.x) ?? 0, y: num(sv.y) ?? 0,
+      w: num(sv.w) == null ? null : Math.max(PANEL_MIN.w, sv.w),
+      h: widthOnly || num(sv.h) == null ? null : Math.max(PANEL_MIN.h, sv.h),
+    };
+
+    const grip = document.createElement('div');
+    grip.className = 'panelgrip';
+    grip.title = 'Drag to move this panel (double-click to reset)';
+    const handle = document.createElement('div');
+    handle.className = 'panelresize';
+    handle.title = 'Drag to resize this panel (double-click to reset)';
+    node.append(grip, handle);
+
+    let drag = null;
+    let lastPress = { t: 0, x: 0, y: 0 };
+    const press = (mode) => (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      bringToFront(node);
+      // Two quick presses in the same spot reset the panel (pointer capture hides the browser's dblclick).
+      if (e.timeStamp - lastPress.t < 400 && Math.hypot(e.clientX - lastPress.x, e.clientY - lastPress.y) < 8) {
+        lastPress.t = 0;
+        resetPanel(id);
+        return;
+      }
+      lastPress = { t: e.timeStamp, x: e.clientX, y: e.clientY };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      const box = panelBoxes[id];
+      drag = {
+        mode, pid: e.pointerId, sx: e.clientX, sy: e.clientY,
+        x: box.x, y: box.y, w: box.w ?? node.offsetWidth, h: box.h ?? node.offsetHeight,
+      };
+      node.classList.add(mode === 'move' ? 'dragging' : 'resizing');
+      document.body.classList.add('moving');
+    };
+    const move = (e) => {
+      if (!drag || e.pointerId !== drag.pid) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      const box = panelBoxes[id];
+      if (drag.mode === 'move') {
+        box.x = drag.x + dx;
+        box.y = drag.y + dy;
+      } else {
+        box.w = Math.max(PANEL_MIN.w, drag.w + dx);
+        if (!widthOnly) box.h = Math.max(PANEL_MIN.h, drag.h + dy);
+      }
+      applyPanel(id);
+    };
+    const end = (e) => {
+      if (!drag || e.pointerId !== drag.pid) return;
+      drag = null;
+      node.classList.remove('dragging', 'resizing');
+      document.body.classList.remove('moving');
+      keepPanelReachable(id);
+      applyPanel(id);
+      savePanels();
+    };
+    grip.addEventListener('pointerdown', press('move'));
+    handle.addEventListener('pointerdown', press('resize'));
+    for (const target of [grip, handle]) {
+      target.addEventListener('pointermove', move);
+      target.addEventListener('pointerup', end);
+      target.addEventListener('pointercancel', end);
+    }
+    // Touching anywhere on a moved or resized panel brings it in front of the others.
+    node.addEventListener('pointerdown', () => {
+      const box = panelBoxes[id];
+      if (box.x || box.y || box.w != null || box.h != null) bringToFront(node);
+    }, true);
+
+    applyPanel(id);
+    keepPanelReachable(id);
+    applyPanel(id);
+  }
+  addEventListener('resize', () => {
+    for (const id of panelEls.keys()) {
+      keepPanelReachable(id);
+      applyPanel(id);
+    }
+  });
+}
+
 // ---------- wiring ----------
 
 el.userForm.addEventListener('submit', (e) => {
@@ -2173,6 +2693,7 @@ el.live.onclick = () => { state.view = null; scheduleRender(); };
 el.flip.onclick = () => { state.flipped = !state.flipped; scheduleRender(); };
 el.sound.onclick = () => {
   state.sound = !state.sound;
+  try { localStorage.setItem(SOUND_KEY, state.sound ? 'on' : 'off'); } catch { /* optional */ }
   el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 };
 el.engineToggle.onclick = () => {
@@ -2229,17 +2750,21 @@ setInterval(() => {
   }
 }, 100);
 
+el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 initSections();
+initBoardUnit();
+initPanels();
 buildBoard();
 render();
 
-let startUser = new URLSearchParams(location.search).get('user');
-if (!startUser) {
-  try { startUser = localStorage.getItem(LAST_USER_KEY); } catch { /* optional */ }
-}
-if (startUser) {
-  watchUser(startUser);
-} else {
+// Start with what was watched last: a ?user= link wins, then the folder or the player from last time.
+(async () => {
+  const linkUser = new URLSearchParams(location.search).get('user');
+  if (linkUser) return watchUser(linkUser);
+  if (await restoreFolder()) return;
+  let lastUser = null;
+  try { lastUser = localStorage.getItem(LAST_USER_KEY); } catch { /* optional */ }
+  if (lastUser) return watchUser(lastUser);
   setStatus('Enter a Lichess username to watch their games live.');
   el.userInput.focus();
-}
+})();
