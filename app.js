@@ -14,6 +14,7 @@ const USER_POLL_MS = 4000;
 const TV_CHECK_MS = 10000;
 const RATE_LIMIT_WAIT_MS = 60000;
 const LAST_USER_KEY = 'livewatch.user';
+const SOURCE_KEY = 'livewatch.source';  // what was watched last: 'user' or 'folder'
 const ENGINE_KEY = 'livewatch.engine';
 const SOUND_KEY = 'livewatch.sound';
 const OPTS_KEY = 'livewatch.opts';
@@ -115,7 +116,11 @@ function watchUser(name) {
   state.view = null;
   state.flipped = false;
   el.userInput.value = name;
-  try { localStorage.setItem(LAST_USER_KEY, name); } catch { /* optional */ }
+  try {
+    localStorage.setItem(LAST_USER_KEY, name);
+    localStorage.setItem(SOURCE_KEY, 'user');
+  } catch { /* optional */ }
+  clearResume();
   history.replaceState(null, '', `${location.pathname}?user=${encodeURIComponent(name)}`);
   document.title = `${name} · Live Watch`;
   setStatus(`Looking for ${name}…`);
@@ -236,20 +241,88 @@ function finish(game) {
 // ---------- following a folder of .jsonl files ----------
 // Another program appends one JSON object per line as a game goes on:
 //   { t, fen, turn, playerColor, gameUrl }
-// We follow the newest .jsonl file in a folder the user picks each time.
+// We follow the newest .jsonl file in a folder the user picks. The folder is remembered (its handle is
+// kept in IndexedDB), so the next session picks up where this one left off: straight away when the
+// browser still allows reading it, otherwise after one click on "Resume" (browsers only re-grant
+// access to a folder from a click).
 
 async function pickFolder() {
+  if (resumeHandle) return resumeFolder();
   if (!window.showDirectoryPicker) {
     setStatus('Your browser can’t open folders. Use Chrome, Edge or another Chromium browser (served from localhost).');
     return;
   }
   let handle;
   try {
-    handle = await window.showDirectoryPicker({ mode: 'read' });
+    handle = await window.showDirectoryPicker({ id: 'livewatch-games', mode: 'read' });
   } catch {
     return;  // cancelled
   }
   watchFolder(handle);
+}
+
+// A tiny IndexedDB key-value store: folder handles can't go in localStorage.
+function idb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('livewatch', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('kv');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction('kv', mode);
+      const req = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => { open.result.close(); resolve(req?.result); };
+      tx.onerror = () => { open.result.close(); reject(tx.error); };
+    };
+  });
+}
+const saveFolderHandle = (handle) => idb('readwrite', (store) => store.put(handle, 'folder')).catch(() => {});
+const loadFolderHandle = () => idb('readonly', (store) => store.get('folder')).catch(() => null);
+
+// A remembered folder the browser wants a click before reading again.
+let resumeHandle = null;
+
+function offerResume(handle) {
+  resumeHandle = handle;
+  el.folderBtn.textContent = `Resume “${handle.name}”`;
+  el.folderBtn.classList.add('resume');
+  el.folderBtn.title = `Keep watching the folder ${handle.name} from last time`;
+  setStatus(`Last time you watched the folder “${handle.name}”. Click Resume to carry on (your browser asks once).`);
+}
+
+function clearResume() {
+  resumeHandle = null;
+  el.folderBtn.textContent = 'Watch folder…';
+  el.folderBtn.classList.remove('resume');
+  el.folderBtn.title = 'Review a game live from the newest .jsonl file in a folder';
+}
+
+async function resumeFolder() {
+  const handle = resumeHandle;
+  let granted = false;
+  try {
+    granted = (await handle.requestPermission({ mode: 'read' })) === 'granted';
+  } catch { /* the folder may be gone */ }
+  clearResume();
+  if (granted) {
+    watchFolder(handle);
+  } else {
+    setStatus(`No access to “${handle.name}”. Use Watch folder… to pick it again.`);
+  }
+}
+
+// On startup: carry on with the folder from last time if that's what was being watched.
+// Returns true when the folder took over (watching, or waiting for the Resume click).
+async function restoreFolder() {
+  let source = null;
+  try { source = localStorage.getItem(SOURCE_KEY); } catch { /* optional */ }
+  if (source !== 'folder' || !window.showDirectoryPicker) return false;
+  const handle = await loadFolderHandle();
+  if (!handle) return false;
+  let permission = 'prompt';
+  try { permission = await handle.queryPermission({ mode: 'read' }); } catch { /* treat as prompt */ }
+  if (permission === 'granted') watchFolder(handle);
+  else offerResume(handle);
+  return true;
 }
 
 function stopFolder() {
@@ -268,6 +341,9 @@ function watchFolder(handle) {
   state.view = null;
   state.flipped = false;
   state.folder = { handle, timer: null, file: null, mtime: 0, size: -1, lines: 0 };
+  clearResume();
+  saveFolderHandle(handle);
+  try { localStorage.setItem(SOURCE_KEY, 'folder'); } catch { /* optional */ }
   el.userInput.value = '';
   el.open.removeAttribute('href');
   history.replaceState(null, '', location.pathname);
@@ -2207,13 +2283,14 @@ initPanels();
 buildBoard();
 render();
 
-let startUser = new URLSearchParams(location.search).get('user');
-if (!startUser) {
-  try { startUser = localStorage.getItem(LAST_USER_KEY); } catch { /* optional */ }
-}
-if (startUser) {
-  watchUser(startUser);
-} else {
+// Start with what was watched last: a ?user= link wins, then the folder or the player from last time.
+(async () => {
+  const linkUser = new URLSearchParams(location.search).get('user');
+  if (linkUser) return watchUser(linkUser);
+  if (await restoreFolder()) return;
+  let lastUser = null;
+  try { lastUser = localStorage.getItem(LAST_USER_KEY); } catch { /* optional */ }
+  if (lastUser) return watchUser(lastUser);
   setStatus('Enter a Lichess username to watch their games live.');
   el.userInput.focus();
-}
+})();
