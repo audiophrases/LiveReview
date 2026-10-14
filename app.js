@@ -1132,6 +1132,7 @@ function detectFork(after, m, me) {
   const captured = m.captured && !m.flags.includes('e') ? SEE_VALUE[m.captured] : 0;
   return {
     lines: targets.map((t) => ({ from: m.to, to: t.sq })),
+    targets: targets.filter((t) => !t.king).map((t) => t.sq),
     gain: gains[1] + captured,
     key: `fork:${targets.map((t) => t.sq).sort().join()}`,
   };
@@ -1157,13 +1158,13 @@ function detectLine(after, m, me) {
     if (vA < vB && vA >= 3) {
       // A pin matters when the pinned piece, which can't step aside, can now be won.
       const gain = bestCaptureOn(after, a, me).gain;
-      if (gain >= 1 && !(found.pin?.gain >= gain)) found.pin = { lines: [{ from: m.to, to: b }], gain, key: `pin:${a}` };
+      if (gain >= 1 && !(found.pin?.gain >= gain)) found.pin = { lines: [{ from: m.to, to: b }], targets: [a], gain, key: `pin:${a}` };
     } else if (vA > vB && vB >= 3) {
       // A skewer: once the front piece gets out of the way, the one behind is taken.
       const g2 = after.map((row) => row.slice());
       g2[8 - +a[1]][a.charCodeAt(0) - 97] = null;
       const gain = captureGain(g2, m.to, b);
-      if (gain >= 2 && !(found.skewer?.gain >= gain)) found.skewer = { lines: [{ from: m.to, to: b }], gain, key: `skewer:${b}` };
+      if (gain >= 2 && !(found.skewer?.gain >= gain)) found.skewer = { lines: [{ from: m.to, to: b }], targets: [b], gain, key: `skewer:${b}` };
     }
   }
   return found;
@@ -1196,7 +1197,7 @@ function detectDiscovered(grid, after, m, me) {
     const lines = [{ from: behind, to: target }];
     const hit = hits.sort((x, y) => y.gain - x.gain)[0];
     if (hit && hit.gain >= captured) lines.push({ from: m.to, to: hit.sq });
-    best = { lines, gain, key: `disc:${behind}${target}` };
+    best = { lines, targets: [...(check ? [] : [target]), ...hits.map((t) => t.sq)], gain, key: `disc:${behind}${target}` };
   }
   return best;
 }
@@ -1222,6 +1223,7 @@ function detectPressure(grid, after, m, me) {
         ...defenders.map((x) => ({ from: x, to: sq, dash: true })),
       ],
       gain,
+      targets: [sq],
       key: `pressure:${sq}`,
     };
   }
@@ -1240,7 +1242,7 @@ function detectRemoval(grid, after, m, me) {
     if (bestCaptureOn(grid, sq, me).gain >= 2) continue;  // already winnable: nothing needed removing
     const next = bestCaptureOn(after, sq, me);
     if (next.gain < 2 || (best && best.gain >= next.gain + first)) continue;
-    best = { lines: [{ from: next.from, to: sq, dash: true }], gain: next.gain + first, key: `removal:${sq}` };
+    best = { lines: [{ from: next.from, to: sq, dash: true }], targets: [sq], gain: next.gain + first, key: `removal:${sq}` };
   }
   return best;
 }
@@ -1267,7 +1269,7 @@ function tacticMoves(fen) {
       if (m.san.endsWith('#')) note('mate', { lines: [], gain: 1000, key: `mate:${m.from}${m.to}` });
       else if (m.san.endsWith('+')) note('check', { lines: [], gain: 0, key: `check:${m.from}${m.to}`, safe });
       if (m.captured) {
-        note('capture', { lines: [], gain: 0, key: `capture:${m.from}${m.to}`, safe });
+        note('capture', { lines: [], targets: [m.to], gain: 0, key: `capture:${m.from}${m.to}`, safe });
         if (!m.flags.includes('e')) {
           const defended = attackersOf(after, m.to, them).length > 0;
           if (!defended && SEE_VALUE[m.captured] >= 3) {
@@ -1279,8 +1281,9 @@ function tacticMoves(fen) {
         }
       }
       if (queens.length && m.captured !== 'q' && SEE_VALUE[m.piece] < 9) {
-        if (queens.some((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)))) {
-          note('queen', { lines: [], gain: 0, key: `queen:${m.from}${m.to}`, safe });
+        const targets = queens.filter((q) => attackersOf(after, q, me).some((sq) => !before.has(sq === m.to ? m.from : sq)));
+        if (targets.length) {
+          note('queen', { lines: [], targets, gain: 0, key: `queen:${m.from}${m.to}`, safe });
         }
       }
       note('fork', detectFork(after, m, me));
@@ -1314,6 +1317,23 @@ function strongerTactic(a, b) {
   return a.cost < b.cost;
 }
 
+// A combination is redundant when every material target can already be taken
+// immediately for at least the same verified gain. An unchecked capture is not
+// proof: the reply search may find that it loses material elsewhere.
+function directCaptureGains(moves, verdict) {
+  const gains = new Map();
+  for (const move of moves) {
+    if (!move.extra.capture) continue;
+    const gain = verdict.gainOf(move.from + move.to);
+    if (gain >= 1 && gain > (gains.get(move.to) || 0)) gains.set(move.to, gain);
+  }
+  return gains;
+}
+
+function redundantTactic(info, gain, direct) {
+  return info.targets?.length > 0 && info.targets.every((square) => (direct.get(square) || 0) >= Math.max(1, gain));
+}
+
 // What to draw for the side to move in `fen`: a mate if there is one (and nothing else), otherwise the
 // `max` ideas that win the most, each idea once and each move once with its most valuable kind. When
 // nothing wins material, one safe attack on the queen or optional capture may be offered.
@@ -1321,11 +1341,13 @@ function strongerTactic(a, b) {
 // turns up the mates in two the rules above don't see.
 function tactics(fen, { max = 2, forcing = true } = {}) {
   const verdict = forcedWins(fen);
+  const moves = tacticMoves(fen);
+  const direct = directCaptureGains(moves, verdict);
   const ideas = new Map();
   const consider = (c) => {
     if (!ideas.has(c.key) || strongerTactic(c, ideas.get(c.key))) ideas.set(c.key, c);
   };
-  for (const t of tacticMoves(fen)) {
+  for (const t of moves) {
     let best = null;
     for (const kind of t.kinds) {
       if (BADGED_TACTICS.has(kind)) continue;
@@ -1338,6 +1360,7 @@ function tactics(fen, { max = 2, forcing = true } = {}) {
         if (gain === null) continue;   // the reply refutes it
         if (gain === undefined) gain = info.gain;   // not checked in time: the rules decide
       }
+      if (kind !== 'mate' && redundantTactic(info, gain, direct)) continue;
       const c = { from: t.from, to: t.to, cost: t.cost, kind, lines: info.lines, gain, key: info.key };
       if (!best || strongerTactic(c, best)) best = c;
     }
@@ -1379,12 +1402,17 @@ function lastMoveTactic(idx) {
   const prev = plies?.[idx - 1];
   if (!ply?.lm || !prev) return null;
   const uci = castleFix(prev.fen, ply.lm);
-  const t = tacticMoves(prev.fen).find((x) => x.from === uci.slice(0, 2) && x.to === uci.slice(2, 4));
-  if (!t || forcedWins(prev.fen).gainOf(t.from + t.to) === null) return null;
+  const moves = tacticMoves(prev.fen);
+  const t = moves.find((x) => x.from === uci.slice(0, 2) && x.to === uci.slice(2, 4));
+  const verdict = forcedWins(prev.fen);
+  const verifiedGain = t ? verdict.gainOf(t.from + t.to) : null;
+  if (!t || verifiedGain === null) return null;
+  const direct = directCaptureGains(moves, verdict);
   let best = null;
   for (const kind of ['fork', 'skewer', 'discovered', 'removal']) {
     const info = t.extra[kind];
     if (!info || !state.opts[TACTIC_OPT[kind]]) continue;
+    if (redundantTactic(info, verifiedGain ?? info.gain, direct)) continue;
     if (!best || info.gain > best.gain) best = { kind, lines: info.lines, gain: info.gain };
   }
   return best;
