@@ -17,6 +17,7 @@ const LAST_USER_KEY = 'livewatch.user';
 const SOURCE_KEY = 'livewatch.source';  // what was watched last: 'user' or 'folder'
 const ENGINE_KEY = 'livewatch.engine';
 const SOUND_KEY = 'livewatch.sound';
+const BLIND_KEY = 'livewatch.blind';
 const OPTS_KEY = 'livewatch.opts';
 const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
 const SWEEP_LINES = 2;
@@ -60,6 +61,7 @@ const state = {
   orientation: 'white',
   flipped: false,
   sound: true,
+  blind: false,
   analysis: true,
   opts: {
     bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
@@ -2858,6 +2860,17 @@ function toggleOpt(name) {
 el.bestToggle.onclick = () => toggleOpt('arrow');
 el.altToggle.onclick = () => toggleOpt('alts');
 el.tacticsToggle.onclick = () => toggleOpt('tactics');
+function applyBlind() {
+  $('board').classList.toggle('blind', state.blind);
+  $('blindToggle').classList.toggle('on', state.blind);
+}
+$('blindToggle').onclick = () => {
+  state.blind = !state.blind;
+  try { localStorage.setItem(BLIND_KEY, state.blind ? 'on' : 'off'); } catch { /* optional */ }
+  applyBlind();
+};
+try { state.blind = localStorage.getItem(BLIND_KEY) === 'on'; } catch { /* optional */ }
+applyBlind();
 el.worst.addEventListener('click', (e) => {
   const card = e.target.closest('[data-ply]');
   if (card) go(+card.dataset.ply);
@@ -2889,6 +2902,7 @@ document.addEventListener('keydown', (e) => {
     b: () => el.bestToggle.click(),
     a: () => el.altToggle.click(),
     t: () => el.tacticsToggle.click(),
+    v: () => $('blindToggle').click(),
   };
   if (keys[e.key]) {
     e.preventDefault();

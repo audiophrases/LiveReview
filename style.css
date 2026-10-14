@@ -143,6 +143,12 @@ a { color: var(--accent); }
 .sq .coord.file { right: 3px; bottom: 1px; }
 .sq .coord.rank { left: 3px; top: 1px; }
 
+/* Blindfold: the board and pieces vanish; layout, badges, arrows and the eval bar stay put. */
+.board.blind .sq, .board.blind .sq.d, .board.blind .sq.check, .board.blind .sq.d.check { background: transparent; }
+.board.blind .sq.last::before { display: none; }
+.board.blind .sq > img { visibility: hidden; }
+.board.blind .sq .coord, .board.blind .sq.d .coord { color: var(--muted, currentColor); opacity: 0.45; }
+
 .controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .controls #live.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .controls a { margin-left: auto; }
@@ -418,6 +424,7 @@ a { color: var(--accent); }
   line-height: 18px;
 }
 .controls #altToggle.on { background: #5b8baf; border-color: #5b8baf; color: #fff; }
+.controls #blindToggle.on { background: #6b5b95; border-color: #6b5b95; color: #fff; }
 .controls #tacticsToggle.on { background: #e58f2a; border-color: #e58f2a; color: #fff; }
 
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12px; color: var(--muted); }
