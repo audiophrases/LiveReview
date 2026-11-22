@@ -36,6 +36,7 @@
         <button id="prev" title="Previous move (←)">◀</button>
         <button id="next" title="Next move (→)">▶</button>
         <button id="live" title="Back to live (End)">Live</button>
+        <button id="studyToggle" type="button" aria-pressed="false" title="Try moves from this position">Study</button>
         <button id="flip" title="Flip board (F)">Flip</button>
         <button id="sound" title="Move sound (M)">Sound on</button>
         <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
@@ -44,6 +45,10 @@
         <button id="tacticsToggle" title="Show position badges and tactical moves on the board (T). Pick which ones in Analysis settings.">Tactics</button>
         <button id="blindToggle" title="Blindfold: hide the board and pieces, keep the eval bar, annotations and badges (V)">Blindfold</button>
         <a id="open"target="_blank" rel="noopener">Open on Lichess</a>
+      </div>
+      <div id="studyInfo" class="study-info" hidden>
+        <p>Click or drag to move. Right-click to mark a square or right-drag to draw an arrow.</p>
+        <p id="studyLine" class="study-line" aria-live="polite" hidden></p>
       </div>
       <div id="legend" class="legend" hidden>
         <span data-kind="undefended"><i class="key badge-key t-undefended"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v6c0 5-8 9-8 9s-8-4-8-9V6Z" fill="currentColor"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="var(--tactic-badge-color)" stroke-width="2" stroke-linecap="round"/></svg></i>Vulnerable piece</span>
@@ -137,6 +142,19 @@
 </main>
 
 <footer class="foot">Games stream from the <a href="https://lichess.org/api" target="_blank" rel="noopener">Lichess public API</a>.</footer>
+
+<dialog id="studyPromotion" class="study-promotion" aria-labelledby="promotionTitle">
+  <form method="dialog">
+    <p id="promotionTitle">Promote pawn</p>
+    <div class="controls">
+      <button value="q" autofocus>Queen</button>
+      <button value="r">Rook</button>
+      <button value="b">Bishop</button>
+      <button value="n">Knight</button>
+      <button value="">Cancel</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="libs/chess.min.js"></script>
 <script src="tactic-badges.js"></script>

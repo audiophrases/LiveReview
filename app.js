@@ -41,6 +41,7 @@ const el = {
   board: $('board'), barTop: $('barTop'), barBottom: $('barBottom'),
   status: $('status'), meta: $('meta'), moves: $('moves'), open: $('open'),
   live: $('live'), flip: $('flip'), sound: $('sound'),
+  studyToggle: $('studyToggle'), studyInfo: $('studyInfo'), studyLine: $('studyLine'), studyPromotion: $('studyPromotion'),
   userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'), themeToggle: $('themeToggle'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
   altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'), legend: $('legend'), worst: $('worst'), worstTitle: $('worstTitle'), tally: $('tally'),
@@ -118,6 +119,7 @@ function isAbort(err) {
 // ---------- following a player ----------
 
 function watchUser(name) {
+  leaveStudy();
   stopFolder();
   state.session++;
   closeGame();
@@ -198,6 +200,7 @@ function closeGame() {
 }
 
 async function openGame(id, session, { quiet = false } = {}) {
+  leaveStudy();
   closeGame();
   const ctrl = new AbortController();
   state.gameCtrl = ctrl;
@@ -343,6 +346,7 @@ function stopFolder() {
 }
 
 function watchFolder(handle) {
+  leaveStudy();
   state.session++;
   closeGame();
   clearTimeout(state.pollTimer);
@@ -434,6 +438,7 @@ function loadJsonl(f, text, sameFile) {
   if (restart) {
     const first = rows.find((r) => r?.fen);
     if (!first) return;
+    leaveStudy();
     game = newFileGame(f.file, first);
     state.game = game;
     state.view = null;
@@ -589,6 +594,10 @@ function addPosition(game, line) {
   if (idx < oldLength) {
     game.version++;   // filled a gap
     return;
+  }
+  if (study && state.game === game) {
+    leaveStudy();
+    state.view = null;
   }
   const now = performance.now();
   // The stream first replays the whole game in one burst; only chime for moves that arrive on their own.
@@ -752,11 +761,12 @@ function canAnalyse(game) {
 
 function pumpEngine() {
   const game = state.game;
-  if (!game || !canAnalyse(game) || !game.plies.length) {
+  const viewFen = viewedFen();
+  if (!viewFen || !canAnalyse(game)) {
     engine.halt();
     return;
   }
-  const chess960 = game.info?.variant?.key === 'chess960';
+  const chess960 = game?.info?.variant?.key === 'chess960';
   const want = (fen, depth, multipv) => {
     const e = evals.get(fen);
     return !terminal(fen) && (!e || e.depth < depth || e.multipv < multipv);
@@ -777,11 +787,10 @@ function pumpEngine() {
   };
 
   // The position on screen comes first, then a sweep back through the game.
-  const viewFen = viewedFen();
   const { depth } = state.opts;
   const multipv = Math.max(state.opts.multipv, state.opts.alts ? 3 : 1);
   if (want(viewFen, depth, multipv)) return start(viewFen, depth, multipv);
-  for (let i = game.plies.length - 1; i >= 0; i--) {
+  for (let i = (game?.plies.length || 0) - 1; i >= 0; i--) {
     const p = game.plies[i];
     if (p && want(p.fen, SWEEP_DEPTH, SWEEP_LINES)) return start(p.fen, SWEEP_DEPTH, SWEEP_LINES);
   }
@@ -810,8 +819,7 @@ function recordInfo(fen, info) {
 }
 
 function viewedFen() {
-  const idx = currentIndex();
-  return idx >= 0 ? state.game.plies[idx].fen : null;
+  return viewedPly()?.fen ?? null;
 }
 
 // 'w' or 'b' for the side that has been mated, 'draw' for stalemate, null otherwise.
@@ -1867,6 +1875,7 @@ function buildBoard() {
     el.board.appendChild(sq);
     squares.push(sq);
   }
+  el.board.appendChild(annotationSvg);
 }
 
 let renderQueued = false;
@@ -1896,20 +1905,27 @@ function currentIndex() {
   return state.view == null ? n - 1 : Math.min(state.view, n - 1);
 }
 
+function viewedPly() {
+  return study ? study.plies[study.cursor] : state.game?.plies[currentIndex()];
+}
+
 function render() {
   const game = state.game;
   const idx = currentIndex();
-  const ply = idx >= 0 ? game.plies[idx] : null;
-  renderBoard(ply, idx);
-  renderBars(ply, idx);
+  const ply = viewedPly();
+  const boardIdx = study?.cursor ? -1 : idx;
+  renderBoard(ply, boardIdx);
+  renderBars(game?.plies[idx], idx);
   renderMoves(idx);
   renderMeta();
-  drawArrows(ply, renderAnalysis(ply, idx));
+  drawArrows(ply, renderAnalysis(ply, boardIdx));
   renderWorst(idx);
   renderTally();
   syncSections();
   renderControls();
-  if (game && ply) {
+  if (study) {
+    setStatus(game && !game.over ? 'Studying the position. A new live move will reset the board.' : 'Studying the position.');
+  } else if (game && ply) {
     if (game.source && !game.over) setStatus(state.view != null ? 'Reviewing. Press Live to catch up.' : `Live · following ${game.source}`);
     else if (game.over) setStatus([game.result || resultText(game), game.waiting].filter(Boolean).join(' '));
     else if (state.view != null) setStatus('Reviewing. Press Live to catch up.');
@@ -1919,7 +1935,8 @@ function render() {
 }
 
 function renderControls() {
-  el.live.classList.toggle('on', state.view == null);
+  el.live.classList.toggle('on', !study && state.view == null);
+  renderStudyControls();
   el.engineToggle.classList.toggle('on', state.analysis);
   el.engineToggle.textContent = state.analysis ? 'Engine on' : 'Engine off';
   el.bestToggle.classList.toggle('on', state.opts.arrow);
@@ -2181,11 +2198,10 @@ function activePositionBadge(ply) {
 }
 
 function refreshBadgeExplanation() {
-  const ply = state.game?.plies[currentIndex()];
   for (const button of el.board.querySelectorAll('[data-badge-kind]')) {
     button.setAttribute('aria-pressed', String(badgeInteraction.pinned === `${button.dataset.badgeSquare}:${button.dataset.badgeKind}`));
   }
-  drawArrows(ply, renderedEngineArrows);
+  drawArrows(renderedBoardPly, renderedEngineArrows);
 }
 
 function squareBadges(name, quality, position) {
@@ -2233,7 +2249,7 @@ function drawArrows(ply, engineArrows) {
         for (const x of t.lines) push({ from: x.from, to: x.to, color, width: 0.06, opacity: opacity * 0.85, dash: dash || x.dash });
       }
     };
-    const idx = currentIndex();
+    const idx = study?.cursor ? -1 : currentIndex();
     const mine = tactics(ply.fen);
     const mating = mine.some((t) => t.kind === 'mate');
     if (!mating) {
@@ -2329,6 +2345,8 @@ function renderBoard(ply, idx) {
     }
   }
   const checkSquare = position ? position.checkedKing : ply ? findCheckedKing(ply.fen) : null;
+  const turn = ply?.fen.split(' ')[1];
+  const playable = canStudy();
 
   // The move's symbol sits on the square the piece landed on.
   let badge = null;
@@ -2342,10 +2360,11 @@ function renderBoard(ply, idx) {
     const f = black ? 7 - (i % 8) : i % 8;
     const name = FILES[f] + (8 - r);
     const sq = squares[i];
+    const piece = grid[r]?.[f];
     sq.dataset.square = name;
     sq.className = 'sq' + ((r + f) % 2 ? ' d' : '') +
-      (lastSquares.includes(name) ? ' last' : '') + (checkSquare === name ? ' check' : '');
-    const piece = grid[r]?.[f];
+      (lastSquares.includes(name) ? ' last' : '') + (checkSquare === name ? ' check' : '') +
+      (playable && piece && colorOf(piece) === turn ? ' playable' : '');
     let html = '';
     if (piece) {
       const color = piece === piece.toUpperCase() ? 'white' : 'black';
@@ -2364,6 +2383,10 @@ function renderBoard(ply, idx) {
       sq.innerHTML = html;
     }
   }
+  renderedBoardPly = ply;
+  if (boardGesture && boardGesture.ply !== ply) cancelBoardGesture();
+  paintBoardAnnotations();
+  paintStudySelection();
 }
 
 // Rows of the board from rank 8 down, each a list of piece letters or null.
@@ -2544,8 +2567,232 @@ function go(idx, dir = -1) {
   idx = Math.max(0, Math.min(n - 1, idx));
   while (!plies[idx] && idx > 0 && idx < n - 1) idx += dir;
   if (!plies[idx]) idx = n - 1;
+  leaveStudy();
   state.view = idx === n - 1 ? null : idx;
   scheduleRender();
+}
+
+// ---------- board study and annotations ----------
+
+const studyChess = new Chess();
+const studyStartFen = studyChess.fen();
+const boardAnnotations = new WeakMap();
+const emptyBoard = {};
+const annotationSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+annotationSvg.setAttribute('class', 'board-annotations');
+annotationSvg.setAttribute('viewBox', '0 0 8 8');
+annotationSvg.setAttribute('aria-hidden', 'true');
+
+let study = null;
+let studySelection = null;
+let pendingPromotion = null;
+let boardGesture = null;
+let renderedBoardPly;
+
+function canStudy() {
+  const variant = state.game?.info?.variant?.key || 'standard';
+  return variant === 'standard' || variant === 'fromPosition';
+}
+
+function beginStudy() {
+  if (study || state.blind || !canStudy()) return;
+  const ply = viewedPly() || { fen: studyStartFen };
+  if (!studyChess.load(ply.fen)) return;
+  study = { plies: [ply], cursor: 0, status: el.status.textContent };
+  scheduleRender();
+}
+
+function leaveStudy() {
+  if (study) setStatus(study.status);
+  study = null;
+  clearStudySelection();
+}
+
+function clearStudySelection() {
+  cancelBoardGesture();
+  studySelection = null;
+  pendingPromotion = null;
+  if (el.studyPromotion.open) el.studyPromotion.close();
+}
+
+function goStudy(cursor) {
+  clearStudySelection();
+  study.cursor = Math.max(0, Math.min(study.plies.length - 1, cursor));
+  scheduleRender();
+}
+
+function renderStudyControls() {
+  const active = !!study;
+  el.studyToggle.classList.toggle('on', active);
+  el.studyToggle.setAttribute('aria-pressed', String(active));
+  el.studyToggle.disabled = !active && (state.blind || !canStudy());
+  el.studyToggle.title = active ? 'End study'
+    : !canStudy() ? 'Study moves are available for standard chess positions'
+    : state.blind ? 'Turn off blindfold to try moves' : 'Try moves from this position';
+  el.studyInfo.hidden = !active;
+  const line = study?.plies.slice(1, study.cursor + 1).map((ply) => ply.san).join(' ') || '';
+  if (el.studyLine.textContent !== line) el.studyLine.textContent = line;
+  el.studyLine.hidden = !line;
+
+  $('first').disabled = $('prev').disabled = active && study.cursor === 0;
+  $('next').disabled = active && study.cursor === study.plies.length - 1;
+  $('first').title = active ? 'First study position (Home)' : 'First move (Home)';
+  $('prev').title = active ? 'Back one study move (←)' : 'Previous move (←)';
+  $('next').title = active ? 'Forward one study move (→)' : 'Next move (→)';
+}
+
+function playStudyMove(move) {
+  if (!studyChess.load(viewedPly().fen)) return;
+  const played = studyChess.move(move);
+  if (!played) return;
+  const lm = played.from + played.to + (played.promotion || '');
+  const next = study.cursor + 1;
+  if (study.plies[next]?.lm !== lm) {
+    study.plies.splice(next);
+    study.plies.push({ fen: studyChess.fen(), lm, san: played.san });
+  }
+  goStudy(next);
+}
+
+function playSelectedTo(to) {
+  const moves = studySelection?.moves.filter((move) => move.to === to) || [];
+  if (!moves.length) return false;
+  if (moves[0].promotion) {
+    pendingPromotion = { ply: viewedPly(), moves };
+    el.studyPromotion.returnValue = '';
+    el.studyPromotion.showModal();
+  } else {
+    playStudyMove(moves[0]);
+  }
+  return true;
+}
+
+function paintStudySelection() {
+  const { from, moves } = studySelection || {};
+  const draggedFrom = boardGesture?.dragImage ? boardGesture.from : null;
+  const targets = new Set(moves?.map((move) => move.to));
+  for (const sq of squares) {
+    const name = sq.dataset.square;
+    sq.classList.toggle('study-selected', name === from);
+    sq.classList.toggle('study-target', targets.has(name));
+    sq.classList.toggle('study-drag-source', name === draggedFrom);
+  }
+}
+
+function paintBoardAnnotations() {
+  const annotations = boardAnnotations.get(renderedBoardPly || emptyBoard);
+  for (const sq of squares) sq.classList.toggle('annotated', !!annotations?.squares.has(sq.dataset.square));
+  const arrows = [...(annotations?.arrows || [])];
+  const preview = boardGesture?.button === 2 && boardGesture.to && boardGesture.to !== boardGesture.from
+    ? boardGesture.from + boardGesture.to : null;
+  if (preview && !annotations?.arrows.has(preview)) arrows.push(preview);
+  annotationSvg.innerHTML = arrows.map((uci) => arrowSvg({
+    from: uci.slice(0, 2), to: uci.slice(2), color: '#ffab00', width: 0.19,
+    opacity: uci === preview && !annotations?.arrows.has(uci) ? 0.48 : 0.72,
+  }, [])).join('');
+}
+
+function toggleBoardAnnotation(ply, from, to) {
+  const key = ply || emptyBoard;
+  let annotations = boardAnnotations.get(key);
+  if (!annotations) {
+    annotations = { squares: new Set(), arrows: new Set() };
+    boardAnnotations.set(key, annotations);
+  }
+  const marks = from === to ? annotations.squares : annotations.arrows;
+  const mark = from === to ? from : from + to;
+  if (!marks.delete(mark)) marks.add(mark);
+}
+
+function cancelBoardGesture() {
+  if (!boardGesture) return;
+  const { id, dragImage } = boardGesture;
+  boardGesture = null;
+  dragImage?.remove();
+  if (el.board.hasPointerCapture(id)) el.board.releasePointerCapture(id);
+}
+
+function boardSquareAt(e) {
+  const square = document.elementFromPoint(e.clientX, e.clientY)?.closest('.sq');
+  return square?.parentElement === el.board ? square.dataset.square : null;
+}
+
+function beginBoardGesture(e) {
+  if (!e.isPrimary || boardGesture || (e.button !== 0 && e.button !== 2)) return;
+  const square = e.target.closest('.sq');
+  if (square?.parentElement !== el.board) return;
+  const from = square.dataset.square;
+  const ply = renderedBoardPly;
+  if (ply !== viewedPly()) return;
+
+  let moves = [];
+  if (e.button === 0) {
+    if (!ply || state.blind || !canStudy() || e.target.closest('button') || el.studyPromotion.open) return;
+    if (square.classList.contains('playable') && studyChess.load(ply.fen)) {
+      moves = studyChess.moves({ square: from, verbose: true });
+    }
+    if (!moves.length && !studySelection) return;
+    if (!study) beginStudy();
+  }
+  boardGesture = { id: e.pointerId, button: e.button, ply, from, square, moves, x: e.clientX, y: e.clientY };
+  el.board.setPointerCapture(e.pointerId);
+  e.preventDefault();
+}
+
+function moveBoardGesture(e) {
+  const gesture = boardGesture;
+  if (gesture?.id !== e.pointerId) return;
+  if (gesture.button === 2) {
+    const to = boardSquareAt(e);
+    if (to !== gesture.to) {
+      gesture.to = to;
+      paintBoardAnnotations();
+    }
+    return;
+  }
+  if (!gesture.dragImage && gesture.moves.length && Math.hypot(e.clientX - gesture.x, e.clientY - gesture.y) >= 5) {
+    const image = gesture.square.querySelector('img').cloneNode();
+    image.className = 'study-drag-piece';
+    image.alt = '';
+    image.style.width = gesture.square.getBoundingClientRect().width + 'px';
+    gesture.dragImage = image;
+    document.body.appendChild(image);
+    studySelection = { from: gesture.from, moves: gesture.moves };
+    paintStudySelection();
+  }
+  if (gesture.dragImage) {
+    gesture.dragImage.style.left = e.clientX + 'px';
+    gesture.dragImage.style.top = e.clientY + 'px';
+  }
+}
+
+function finishBoardGesture(e) {
+  const gesture = boardGesture;
+  if (gesture?.id !== e.pointerId) return;
+  const to = boardSquareAt(e);
+  cancelBoardGesture();
+  if (to && gesture.ply === viewedPly()) {
+    const { button, from, moves, dragImage } = gesture;
+    if (button === 2) {
+      toggleBoardAnnotation(gesture.ply, from, to);
+    } else if (dragImage || from !== to) {
+      if (moves.length) {
+        studySelection = { from, moves };
+        playSelectedTo(to);
+      }
+    } else if (!playSelectedTo(to)) {
+      studySelection = moves.length && from !== studySelection?.from ? { from, moves } : null;
+    }
+  }
+  paintBoardAnnotations();
+  paintStudySelection();
+}
+
+function interruptBoardGesture(e) {
+  if (boardGesture?.id !== e.pointerId) return;
+  cancelBoardGesture();
+  paintBoardAnnotations();
+  paintStudySelection();
 }
 
 // ---------- movable, resizable board ----------
@@ -2800,6 +3047,21 @@ function badgeKey(button) {
   return `${button.dataset.badgeSquare}:${button.dataset.badgeKind}`;
 }
 
+el.board.addEventListener('contextmenu', (e) => e.preventDefault());
+el.board.addEventListener('pointerdown', beginBoardGesture);
+el.board.addEventListener('pointermove', moveBoardGesture);
+el.board.addEventListener('pointerup', finishBoardGesture);
+el.board.addEventListener('pointercancel', interruptBoardGesture);
+el.board.addEventListener('lostpointercapture', interruptBoardGesture);
+el.studyPromotion.addEventListener('close', () => {
+  if (el.studyPromotion.open) return;
+  const promotion = pendingPromotion;
+  pendingPromotion = null;
+  if (!promotion || promotion.ply !== viewedPly()) return;
+  const move = promotion.moves.find((candidate) => candidate.promotion === el.studyPromotion.returnValue);
+  if (move) playStudyMove(move);
+});
+
 el.board.addEventListener('pointerover', (e) => {
   if (e.pointerType !== 'mouse') return;
   const button = e.target.closest('[data-badge-kind]');
@@ -2865,11 +3127,19 @@ el.moves.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-ply]');
   if (btn) go(+btn.dataset.ply);
 });
-$('first').onclick = () => go(0, 1);
-$('prev').onclick = () => go(currentIndex() - 1, -1);
-$('next').onclick = () => go(currentIndex() + 1, 1);
-el.live.onclick = () => { state.view = null; scheduleRender(); };
-el.flip.onclick = () => { state.flipped = !state.flipped; scheduleRender(); };
+$('first').onclick = () => study ? goStudy(0) : go(0, 1);
+$('prev').onclick = () => study ? goStudy(study.cursor - 1) : go(currentIndex() - 1, -1);
+$('next').onclick = () => study ? goStudy(study.cursor + 1) : go(currentIndex() + 1, 1);
+el.studyToggle.onclick = () => {
+  if (study) {
+    leaveStudy();
+    scheduleRender();
+  } else {
+    beginStudy();
+  }
+};
+el.live.onclick = () => { leaveStudy(); state.view = null; scheduleRender(); };
+el.flip.onclick = () => { cancelBoardGesture(); state.flipped = !state.flipped; scheduleRender(); };
 el.sound.onclick = () => {
   state.sound = !state.sound;
   try { localStorage.setItem(SOUND_KEY, state.sound ? 'on' : 'off'); } catch { /* optional */ }
@@ -2894,8 +3164,10 @@ function applyBlind() {
 }
 $('blindToggle').onclick = () => {
   state.blind = !state.blind;
+  if (state.blind) clearStudySelection();
   try { localStorage.setItem(BLIND_KEY, state.blind ? 'on' : 'off'); } catch { /* optional */ }
   applyBlind();
+  scheduleRender();
 };
 try { state.blind = localStorage.getItem(BLIND_KEY) === 'on'; } catch { /* optional */ }
 applyBlind();
@@ -2913,7 +3185,12 @@ el.settings.addEventListener('change', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (el.studyPromotion.open) return;
   if (e.key === 'Escape') {
+    clearStudySelection();
+    boardAnnotations.delete(renderedBoardPly || emptyBoard);
+    paintBoardAnnotations();
+    paintStudySelection();
     Object.assign(badgeInteraction, { pinned: null, hovered: null, focused: null });
     refreshBadgeExplanation();
     return;

@@ -117,6 +117,7 @@ a { color: var(--accent); }
 .bar .clock.running.low { background: var(--low); color: #fff; }
 
 .board {
+  --annotation: rgb(235 95 78 / 76%);
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   aspect-ratio: 1;
@@ -127,10 +128,33 @@ a { color: var(--accent); }
 }
 .sq { position: relative; background: var(--light); }
 .sq.d { background: var(--dark); }
-.sq.last::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--last); }
+.sq:is(.last, .annotated, .study-selected)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.sq.last::before { background: var(--last); }
+.sq.study-selected::before { background: rgb(243 223 71 / 55%); }
+.sq.annotated::before { background: var(--annotation); }
+.sq.last.annotated::before { background: linear-gradient(var(--annotation), var(--annotation)), var(--last); }
 .sq.check { background: radial-gradient(circle, #ff3b2f 0%, #e3261a 30%, transparent 75%), var(--light); }
 .sq.d.check { background: radial-gradient(circle, #ff3b2f 0%, #e3261a 30%, transparent 75%), var(--dark); }
 .sq img { position: absolute; inset: 0; width: 100%; height: 100%; }
+.board:not(.blind) .sq.playable > img { cursor: grab; touch-action: none; }
+.sq.study-target { cursor: pointer; }
+.sq.study-target::after {
+  content: "";
+  position: absolute;
+  inset: 36%;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 23%);
+  pointer-events: none;
+}
+.sq.study-target:has(> img)::after { inset: 3%; background: transparent; border: 4px solid rgb(0 0 0 / 26%); }
+.sq.study-drag-source > img { visibility: hidden; }
+.study-drag-piece { position: fixed; z-index: 10000; transform: translate(-50%, -50%); pointer-events: none; }
 .sq .coord {
   position: absolute;
   font-size: 11px;
@@ -145,13 +169,20 @@ a { color: var(--accent); }
 /* Blindfold: the board and pieces vanish; layout, badges, arrows and the eval bar stay put. */
 .board.blind { box-shadow: none; }
 .board.blind .sq, .board.blind .sq.d, .board.blind .sq.check, .board.blind .sq.d.check { background: transparent; }
-.board.blind .sq.last::before { display: none; }
+.board.blind .sq.last:not(.annotated)::before { display: none; }
+.board.blind .sq.last.annotated::before { background: var(--annotation); }
 .board.blind .sq > img { visibility: hidden; }
 .board.blind .sq .coord, .board.blind .sq.d .coord { color: var(--muted, currentColor); opacity: 0.45; }
 
 .controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.controls #live.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.controls #live.on, .controls #studyToggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .controls a { margin-left: auto; }
+.study-info { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.study-info p { margin: 4px 0; }
+.study-line { color: var(--text); overflow-wrap: anywhere; }
+.study-promotion { max-width: calc(100% - 32px); padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
+.study-promotion p { margin: 0 0 8px; font-weight: 600; }
+.study-promotion::backdrop { background: rgb(0 0 0 / 35%); }
 
 .side {
   min-width: 0;
@@ -283,6 +314,7 @@ a { color: var(--accent); }
 
 .board { position: relative; }
 .board svg.arrows { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+.board svg.board-annotations { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
 
 .engine { font-size: 13px; }
 .engine .head { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
