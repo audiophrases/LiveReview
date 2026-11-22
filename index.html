@@ -10,13 +10,43 @@
 </head>
 <body>
 <header class="top">
-  <h1>Live Watch</h1>
-  <form id="userForm" class="pick">
-    <input id="userInput" placeholder="Lichess username" autocomplete="off" spellcheck="false" aria-label="Lichess username">
-    <button>Watch</button>
-  </form>
-  <button id="folderBtn" class="pickfolder" type="button" title="Review a game live from the newest .jsonl file in a folder">Watch folder…</button>
-  <button id="themeToggle" class="theme-toggle" type="button">Switch to dark mode</button>
+  <div class="controls board-controls" role="group" aria-label="Board controls">
+    <button id="first" title="First move (Home)">⏮</button>
+    <button id="prev" title="Previous move (←)">◀</button>
+    <button id="next" title="Next move (→)">▶</button>
+    <button id="live" title="Back to live (End)">Live</button>
+    <button id="studyToggle" type="button" aria-pressed="false" title="Try moves from this position">Study</button>
+    <button id="flip" title="Flip board (F)">Flip</button>
+    <button id="sound" title="Move sound (M)">Sound on</button>
+    <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
+    <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
+    <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
+    <button id="tacticsToggle" title="Show position badges and tactical moves on the board (T). Pick which ones in Analysis settings.">Tactics</button>
+    <button id="legendToggle" type="button" popovertarget="legend" hidden>Legend</button>
+    <div id="legend" class="legend" popover>
+      <span data-kind="undefended"><i class="key badge-key t-undefended"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v6c0 5-8 9-8 9s-8-4-8-9V6Z" fill="currentColor"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="var(--tactic-badge-color)" stroke-width="2" stroke-linecap="round"/></svg></i>Vulnerable piece</span>
+      <span data-kind="pinned"><i class="key badge-key t-pinned"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v3h-2v5l3 3v2h-5v5h-2v-5H6v-2l3-3V6H7Z" fill="currentColor"/></svg></i>Pinned piece</span>
+      <span data-kind="checkable"><i class="key badge-key t-checkable"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"/></svg></i>Checkable king</span>
+      <span data-kind="mateStatus"><i class="key badge-key t-mate">#</i>Checkmate</span>
+      <span data-kind="mate"><i class="key mate"></i>Mate in one or two</span>
+      <span data-kind="fork"><i class="key fork"></i>Fork</span>
+      <span data-kind="pin"><i class="key pin"></i>Moves creating pins</span>
+      <span data-kind="skewer"><i class="key skewer"></i>Skewer</span>
+      <span data-kind="discovered"><i class="key discovered"></i>Discovered attack</span>
+      <span data-kind="removal"><i class="key removal"></i>Removal of the defender</span>
+      <span data-kind="zwischen"><i class="key zwischen"></i>Zwischenzug</span>
+      <span data-kind="pressure"><i class="key pressure"></i>Moves adding winning pressure</span>
+      <span data-kind="queen"><i class="key queen"></i>Attacks the queen</span>
+      <span data-kind="capture"><i class="key capture"></i>Capture</span>
+      <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
+    </div>
+    <button id="blindToggle" title="Blindfold: hide the board and pieces, keep the eval bar, annotations and badges (V)">Blindfold</button>
+    <a id="open" target="_blank" rel="noopener">Open on Lichess</a>
+  </div>
+  <div class="top-actions">
+    <button id="folderBtn" class="pickfolder" type="button" title="Review a game live from the newest .jsonl file in a folder">Watch folder…</button>
+    <button id="themeToggle" class="theme-toggle" type="button">Switch to dark mode</button>
+  </div>
 </header>
 
 <main class="layout">
@@ -30,47 +60,13 @@
       <div class="bar" id="barBottom" title="Drag to move the board (double-click to reset)"></div>
       <div class="boardresize" id="boardResize" title="Drag to resize the board (double-click to reset)"></div>
     </div>
-    <div class="controlpanel panel" id="controlpanel" data-panel="controls" data-size="width">
-      <div class="controls">
-        <button id="first" title="First move (Home)">⏮</button>
-        <button id="prev" title="Previous move (←)">◀</button>
-        <button id="next" title="Next move (→)">▶</button>
-        <button id="live" title="Back to live (End)">Live</button>
-        <button id="studyToggle" type="button" aria-pressed="false" title="Try moves from this position">Study</button>
-        <button id="flip" title="Flip board (F)">Flip</button>
-        <button id="sound" title="Move sound (M)">Sound on</button>
-        <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
-        <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
-        <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
-        <button id="tacticsToggle" title="Show position badges and tactical moves on the board (T). Pick which ones in Analysis settings.">Tactics</button>
-        <button id="blindToggle" title="Blindfold: hide the board and pieces, keep the eval bar, annotations and badges (V)">Blindfold</button>
-        <a id="open"target="_blank" rel="noopener">Open on Lichess</a>
-      </div>
-      <div id="studyInfo" class="study-info" hidden>
-        <p>Click or drag to move. Right-click to mark a square or right-drag to draw an arrow.</p>
-        <p id="studyLine" class="study-line" aria-live="polite" hidden></p>
-      </div>
-      <div id="legend" class="legend" hidden>
-        <span data-kind="undefended"><i class="key badge-key t-undefended"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v6c0 5-8 9-8 9s-8-4-8-9V6Z" fill="currentColor"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="var(--tactic-badge-color)" stroke-width="2" stroke-linecap="round"/></svg></i>Vulnerable piece</span>
-        <span data-kind="pinned"><i class="key badge-key t-pinned"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v3h-2v5l3 3v2h-5v5h-2v-5H6v-2l3-3V6H7Z" fill="currentColor"/></svg></i>Pinned piece</span>
-        <span data-kind="checkable"><i class="key badge-key t-checkable"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"/></svg></i>Checkable king</span>
-        <span data-kind="mateStatus"><i class="key badge-key t-mate">#</i>Checkmate</span>
-        <span data-kind="mate"><i class="key mate"></i>Mate in one or two</span>
-        <span data-kind="fork"><i class="key fork"></i>Fork</span>
-        <span data-kind="pin"><i class="key pin"></i>Moves creating pins</span>
-        <span data-kind="skewer"><i class="key skewer"></i>Skewer</span>
-        <span data-kind="discovered"><i class="key discovered"></i>Discovered attack</span>
-        <span data-kind="removal"><i class="key removal"></i>Removal of the defender</span>
-        <span data-kind="zwischen"><i class="key zwischen"></i>Zwischenzug</span>
-        <span data-kind="pressure"><i class="key pressure"></i>Moves adding winning pressure</span>
-        <span data-kind="queen"><i class="key queen"></i>Attacks the queen</span>
-        <span data-kind="capture"><i class="key capture"></i>Capture</span>
-        <span class="opp"><i class="key dashed"></i>Opponent's threats</span>
-      </div>
+    <div id="studyInfo" class="study-info" hidden>
+      <p>Click or drag to move. Right-click to mark a square or right-drag to draw an arrow.</p>
+      <p id="studyLine" class="study-line" aria-live="polite" hidden></p>
     </div>
   </section>
 
-  <aside class="side analysis panel" id="analysis" data-panel="analysis" data-size="both">
+  <aside class="side analysis panel" id="analysis" data-panel="analysis">
     <div class="pscroll">
     <div class="head-block">
       <p id="status" class="status">Connecting…</p>
@@ -135,7 +131,7 @@
     </div>
   </aside>
 
-  <aside class="side movespanel panel" id="movespanel" data-panel="moves" data-size="both">
+  <aside class="side movespanel panel" id="movespanel" data-panel="moves">
     <h2 class="movestitle">Moves</h2>
     <ol id="moves" class="moves"></ol>
   </aside>

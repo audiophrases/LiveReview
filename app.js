@@ -42,9 +42,10 @@ const el = {
   status: $('status'), meta: $('meta'), moves: $('moves'), open: $('open'),
   live: $('live'), flip: $('flip'), sound: $('sound'),
   studyToggle: $('studyToggle'), studyInfo: $('studyInfo'), studyLine: $('studyLine'), studyPromotion: $('studyPromotion'),
-  userForm: $('userForm'), userInput: $('userInput'), folderBtn: $('folderBtn'), themeToggle: $('themeToggle'),
+  folderBtn: $('folderBtn'), themeToggle: $('themeToggle'),
   engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
-  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'), legend: $('legend'), worst: $('worst'), worstTitle: $('worstTitle'), tally: $('tally'),
+  altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'),
+  legend: $('legend'), legendToggle: $('legendToggle'), worst: $('worst'), worstTitle: $('worstTitle'), tally: $('tally'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
   evalbar: $('evalbar'), evalfill: $('evalfill'), evaltext: $('evaltext'),
 };
@@ -128,7 +129,6 @@ function watchUser(name) {
   state.game = null;
   state.view = null;
   state.flipped = false;
-  el.userInput.value = name;
   try {
     localStorage.setItem(LAST_USER_KEY, name);
     localStorage.setItem(SOURCE_KEY, 'user');
@@ -359,7 +359,6 @@ function watchFolder(handle) {
   clearResume();
   saveFolderHandle(handle);
   try { localStorage.setItem(SOURCE_KEY, 'folder'); } catch { /* optional */ }
-  el.userInput.value = '';
   el.open.removeAttribute('href');
   history.replaceState(null, '', location.pathname);
   document.title = `${handle.name} · Live Watch`;
@@ -1944,7 +1943,8 @@ function renderControls() {
   el.altToggle.classList.toggle('on', state.opts.alts);
   el.altToggle.disabled = !state.analysis;
   el.tacticsToggle.classList.toggle('on', state.opts.tactics);
-  el.legend.hidden = !state.opts.tactics;
+  el.legendToggle.hidden = !state.opts.tactics;
+  if (el.legendToggle.hidden && el.legend.matches(':popover-open')) el.legend.hidePopover();
   el.legend.classList.toggle('threats', state.opts.threats);
   for (const item of el.legend.querySelectorAll('[data-kind]')) {
     item.hidden = !state.opts[BADGE_OPT[item.dataset.kind] || TACTIC_OPT[item.dataset.kind]];
@@ -2903,7 +2903,7 @@ function initBoardUnit() {
 }
 
 // ---------- movable, resizable panels ----------
-// The analysis panel, the moves list and the control buttons each get a grip on their top edge
+// The analysis panel and moves list each get a grip on their top edge
 // (drag to move) and a corner handle (drag to resize). Moving uses the CSS `translate` property, so
 // nothing reflows; resizing sets width and height. Everything is remembered.
 
@@ -2953,13 +2953,12 @@ function initPanels() {
 
   for (const node of document.querySelectorAll('.panel[data-panel]')) {
     const id = node.dataset.panel;
-    const widthOnly = node.dataset.size === 'width';
     panelEls.set(id, node);
     const sv = saved[id] || {};
     panelBoxes[id] = {
       x: num(sv.x) ?? 0, y: num(sv.y) ?? 0,
       w: num(sv.w) == null ? null : Math.max(PANEL_MIN.w, sv.w),
-      h: widthOnly || num(sv.h) == null ? null : Math.max(PANEL_MIN.h, sv.h),
+      h: num(sv.h) == null ? null : Math.max(PANEL_MIN.h, sv.h),
     };
 
     const grip = document.createElement('div');
@@ -3003,7 +3002,7 @@ function initPanels() {
         box.y = drag.y + dy;
       } else {
         box.w = Math.max(PANEL_MIN.w, drag.w + dx);
-        if (!widthOnly) box.h = Math.max(PANEL_MIN.h, drag.h + dy);
+        box.h = Math.max(PANEL_MIN.h, drag.h + dy);
       }
       applyPanel(id);
     };
@@ -3116,12 +3115,6 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (!document.documentElement.dataset.theme) updateThemeToggle();
 });
 
-el.userForm.addEventListener('submit', (e) => {
-  e.preventDefault();
-  const name = el.userInput.value.trim().replace(/^.*lichess\.org\/@\//, '').replace(/\/.*$/, '');
-  if (/^[A-Za-z0-9_-]{2,30}$/.test(name)) watchUser(name);
-  else setStatus('That doesn’t look like a Lichess username.');
-});
 el.folderBtn.onclick = pickFolder;
 el.moves.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-ply]');
@@ -3187,6 +3180,7 @@ el.settings.addEventListener('change', (e) => {
 document.addEventListener('keydown', (e) => {
   if (el.studyPromotion.open) return;
   if (e.key === 'Escape') {
+    if (el.legend.matches(':popover-open')) return;
     clearStudySelection();
     boardAnnotations.delete(renderedBoardPly || emptyBoard);
     paintBoardAnnotations();
@@ -3238,6 +3232,5 @@ render();
   let lastUser = null;
   try { lastUser = localStorage.getItem(LAST_USER_KEY); } catch { /* optional */ }
   if (lastUser) return watchUser(lastUser);
-  setStatus('Enter a Lichess username to watch their games live.');
-  el.userInput.focus();
+  setStatus('Choose Watch folder… to start reviewing a game.');
 })();
