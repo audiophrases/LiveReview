@@ -60,6 +60,28 @@ a { color: var(--accent); }
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
+@media (hover: hover) and (pointer: fine) {
+  .top.auto-hide {
+    position: fixed;
+    inset: 0 0 auto;
+    z-index: 1;
+    transition: translate 160ms ease-out;
+  }
+  /* Keep a small hit area at the top edge when the bar is offscreen. */
+  .top.auto-hide::after {
+    content: "";
+    position: absolute;
+    inset: 100% 0 auto;
+    height: 8px;
+  }
+  .top.auto-hide:not(:hover, :has(:focus-visible, .legend:popover-open)) {
+    translate: 0 -100%;
+    transition-delay: 200ms;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .top.auto-hide { transition: none; }
+}
 .top .board-controls { min-width: 0; margin: 0; }
 .top-actions { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin-left: auto; }
 .top-actions button { white-space: nowrap; }
@@ -79,6 +101,7 @@ a { color: var(--accent); }
 }
 
 .layout {
+  isolation: isolate;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas: "stage" "analysis" "moves";

@@ -38,6 +38,7 @@ const KINDS = {
 
 const $ = (id) => document.getElementById(id);
 const el = {
+  top: document.querySelector('.top'),
   board: $('board'), barTop: $('barTop'), barBottom: $('barBottom'),
   status: $('status'), meta: $('meta'), moves: $('moves'), open: $('open'),
   live: $('live'), flip: $('flip'), sound: $('sound'),
@@ -1934,6 +1935,8 @@ function render() {
 }
 
 function renderControls() {
+  const game = state.game;
+  el.top.classList.toggle('auto-hide', Boolean(game?.plies.length && !game.over));
   el.live.classList.toggle('on', !study && state.view == null);
   renderStudyControls();
   el.engineToggle.classList.toggle('on', state.analysis);
