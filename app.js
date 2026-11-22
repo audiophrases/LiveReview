@@ -489,10 +489,6 @@ function applyPlayerColor(game, color) {
   if (color !== 'white' && color !== 'black') return;
   if (game.info.playerColor === color) return;
   game.info.playerColor = color;
-  game.info.players = {
-    white: { user: { name: color === 'white' ? 'You' : 'Opponent' } },
-    black: { user: { name: color === 'black' ? 'You' : 'Opponent' } },
-  };
   state.orientation = color;
 }
 
@@ -2420,7 +2416,8 @@ function barHtml(game, color, ply, idx) {
   if (!game?.info) return '';
   const p = game.info.players?.[color];
   const u = p?.user;
-  const name = u ? u.name : p?.aiLevel ? `Stockfish level ${p.aiLevel}` : color === 'white' ? 'White' : 'Black';
+  const fallback = game.source ? '' : cap(color);
+  const name = u?.name ?? (p?.aiLevel ? `Stockfish level ${p.aiLevel}` : fallback);
   const title = u?.title ? `<span class="title">${esc(u.title)}</span>` : '';
   const rating = p?.rating ? `<span class="rating">${p.rating}</span>` : '';
   const { seconds, running } = clockFor(game, color, ply, idx);
