@@ -5,9 +5,9 @@
   --muted: #6d675e;
   --line: #ddd6cb;
   --accent: #2f6f4f;
-  --light: #ecdab9;
-  --dark: #ae8a68;
-  --last: rgba(155, 199, 0, 0.45);
+  --light: #e9ebd0;
+  --dark: #769653;
+  --last: rgb(255 255 40 / 45%);
   --clock: #ece7df;
   --clock-run: #2f6f4f;
   --clock-run-text: #fff;
@@ -122,20 +122,19 @@ a { color: var(--accent); }
   aspect-ratio: 1;
   width: 100%;
   border-radius: 4px;
-  overflow: hidden;
+  box-shadow: 0 0 0 3px #292a22;
   user-select: none;
 }
 .sq { position: relative; background: var(--light); }
 .sq.d { background: var(--dark); }
-.sq.last::before { content: ""; position: absolute; inset: 0; background: var(--last); }
+.sq.last::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--last); }
 .sq.check { background: radial-gradient(circle, #ff3b2f 0%, #e3261a 30%, transparent 75%), var(--light); }
 .sq.d.check { background: radial-gradient(circle, #ff3b2f 0%, #e3261a 30%, transparent 75%), var(--dark); }
 .sq img { position: absolute; inset: 0; width: 100%; height: 100%; }
 .sq .coord {
   position: absolute;
   font-size: 11px;
-  font-weight: 600;
-  opacity: 0.75;
+  font-weight: 500;
   color: var(--dark);
   pointer-events: none;
 }
@@ -144,6 +143,7 @@ a { color: var(--accent); }
 .sq .coord.rank { left: 3px; top: 1px; }
 
 /* Blindfold: the board and pieces vanish; layout, badges, arrows and the eval bar stay put. */
+.board.blind { box-shadow: none; }
 .board.blind .sq, .board.blind .sq.d, .board.blind .sq.check, .board.blind .sq.d.check { background: transparent; }
 .board.blind .sq.last::before { display: none; }
 .board.blind .sq > img { visibility: hidden; }
@@ -393,8 +393,10 @@ a { color: var(--accent); }
 }
 .sq .coord { z-index: 2; }
 .sq:has(.badge-cluster > :nth-child(3)) .coord.rank { top: 40%; }
-.board { overflow: visible; }
-.board .sq:first-child { border-top-left-radius: 4px; }
+.board > .sq:nth-child(1) { border-top-left-radius: inherit; }
+.board > .sq:nth-child(8) { border-top-right-radius: inherit; }
+.board > .sq:nth-child(57) { border-bottom-left-radius: inherit; }
+.board > .sq:nth-child(64) { border-bottom-right-radius: inherit; }
 
 .engine .head .adv { font-weight: 700; color: var(--text); }
 .engine .note { margin-top: 8px; }
