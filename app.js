@@ -20,6 +20,7 @@ const SOUND_KEY = 'livewatch.sound';
 const BLIND_KEY = 'livewatch.blind';
 const OPTS_KEY = 'livewatch.opts';
 const BEST_REVIEW_MODES = ['Disabled', 'All my moves', 'My blunders'];
+const LIVE_MOVE_OPTIONS = ['arrow', 'alts', 'lines'];
 const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
 const SWEEP_LINES = 2;
 const ANALYSABLE = ['standard', 'fromPosition', 'chess960'];
@@ -79,7 +80,8 @@ try {
   state.sound = localStorage.getItem(SOUND_KEY) !== 'off';
   const saved = JSON.parse(localStorage.getItem(OPTS_KEY) || '{}') || {};
   Object.assign(state.opts, saved);
-  if (!BEST_REVIEW_MODES.includes(state.opts.bestReview)) state.opts.bestReview = 'Disabled';
+  // Older saves could keep live hints switched on underneath post-move review.
+  setOption('bestReview', BEST_REVIEW_MODES.includes(saved.bestReview) ? saved.bestReview : 'Disabled');
   // Carry the old arrow preferences into their replacement position badges.
   if (!('tUndefended' in saved) && ('tHanging' in saved || 'tTrade' in saved)) {
     state.opts.tUndefended = (saved.tHanging ?? true) || (saved.tTrade ?? true);
@@ -88,6 +90,15 @@ try {
   if (!('tCheckable' in saved) && 'tCheck' in saved) state.opts.tCheckable = !!saved.tCheck;
   for (const retired of ['tHanging', 'tTrade', 'tCheck']) delete state.opts[retired];
 } catch { /* optional */ }
+
+function setOption(name, value) {
+  state.opts[name] = value;
+  if (name === 'bestReview' && value !== 'Disabled') {
+    for (const option of LIVE_MOVE_OPTIONS) state.opts[option] = false;
+  } else if (value && LIVE_MOVE_OPTIONS.includes(name)) {
+    state.opts.bestReview = 'Disabled';
+  }
+}
 
 function saveOpts() {
   try { localStorage.setItem(OPTS_KEY, JSON.stringify(state.opts)); } catch { /* optional */ }
@@ -1957,16 +1968,22 @@ function renderControls() {
   el.top.classList.toggle('auto-hide', Boolean(game?.plies.length && !game.over));
   el.live.classList.toggle('on', !study && state.view == null);
   renderStudyControls();
+  el.sound.classList.toggle('on', state.sound);
+  el.sound.setAttribute('aria-pressed', String(state.sound));
   el.engineToggle.classList.toggle('on', state.analysis);
-  el.engineToggle.textContent = state.analysis ? 'Engine on' : 'Engine off';
-  const review = bestReviewActive();
-  el.bestReview.textContent = `BestReview · ${state.opts.bestReview}`;
-  el.bestReview.classList.toggle('on', state.opts.bestReview !== 'Disabled');
+  el.engineToggle.setAttribute('aria-pressed', String(state.analysis));
+  const reviewLabel = `After · ${state.opts.bestReview}`;
+  el.bestReview.setAttribute('aria-label', reviewLabel);
+  el.bestReview.title = `${reviewLabel} (A)`;
+  el.bestReview.classList.toggle('on', state.opts.bestReview === 'All my moves');
+  el.bestReview.classList.toggle('blunder', state.opts.bestReview === 'My blunders');
   el.bestReview.disabled = !state.analysis;
-  el.bestToggle.classList.toggle('on', !review && state.opts.arrow);
-  el.bestToggle.disabled = !state.analysis || review;
-  el.altToggle.classList.toggle('on', !review && state.opts.alts);
-  el.altToggle.disabled = !state.analysis || review;
+  el.bestToggle.classList.toggle('on', state.opts.arrow);
+  el.bestToggle.setAttribute('aria-pressed', String(state.opts.arrow));
+  el.bestToggle.disabled = !state.analysis;
+  el.altToggle.classList.toggle('on', state.opts.alts);
+  el.altToggle.setAttribute('aria-pressed', String(state.opts.alts));
+  el.altToggle.disabled = !state.analysis;
   el.tacticsToggle.classList.toggle('on', state.opts.tactics);
   el.legendToggle.hidden = !state.opts.tactics;
   if (el.legendToggle.hidden && el.legend.matches(':popover-open')) el.legend.hidePopover();
@@ -1979,8 +1996,7 @@ function renderControls() {
     const v = state.opts[input.dataset.opt];
     if (input.type === 'checkbox') input.checked = !!v;
     else input.value = String(v);
-    input.disabled = (!state.analysis && !('noengine' in input.dataset)) ||
-      (review && ['arrow', 'alts', 'lines'].includes(input.dataset.opt));
+    input.disabled = !state.analysis && !('noengine' in input.dataset);
   }
 }
 
@@ -2653,8 +2669,9 @@ function clearStudySelection() {
 }
 
 function goStudy(cursor) {
+  if (cursor < 0 || cursor >= study.plies.length || cursor === study.cursor) return;
   clearStudySelection();
-  study.cursor = Math.max(0, Math.min(study.plies.length - 1, cursor));
+  study.cursor = cursor;
   scheduleRender();
 }
 
@@ -2670,12 +2687,6 @@ function renderStudyControls() {
   const line = study?.plies.slice(1, study.cursor + 1).map((ply) => ply.san).join(' ') || '';
   if (el.studyLine.textContent !== line) el.studyLine.textContent = line;
   el.studyLine.hidden = !line;
-
-  $('first').disabled = $('prev').disabled = active && study.cursor === 0;
-  $('next').disabled = active && study.cursor === study.plies.length - 1;
-  $('first').title = active ? 'First study position (Home)' : 'First move (Home)';
-  $('prev').title = active ? 'Back one study move (←)' : 'Previous move (←)';
-  $('next').title = active ? 'Forward one study move (→)' : 'Next move (→)';
 }
 
 function playStudyMove(move) {
@@ -3138,7 +3149,10 @@ document.addEventListener('pointerdown', (e) => {
 function updateThemeToggle() {
   const theme = document.documentElement.dataset.theme;
   const isDark = theme === 'dark' || (!theme && matchMedia('(prefers-color-scheme: dark)').matches);
-  el.themeToggle.textContent = `Switch to ${isDark ? 'light' : 'dark'} mode`;
+  const label = `Switch to ${isDark ? 'light' : 'dark'} mode`;
+  el.themeToggle.textContent = isDark ? '☀' : '☾';
+  el.themeToggle.setAttribute('aria-label', label);
+  el.themeToggle.title = label;
 }
 updateThemeToggle();
 el.themeToggle.onclick = () => {
@@ -3157,9 +3171,6 @@ el.moves.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-ply]');
   if (btn) go(+btn.dataset.ply);
 });
-$('first').onclick = () => study ? goStudy(0) : go(0, 1);
-$('prev').onclick = () => study ? goStudy(study.cursor - 1) : go(currentIndex() - 1, -1);
-$('next').onclick = () => study ? goStudy(study.cursor + 1) : go(currentIndex() + 1, 1);
 el.studyToggle.onclick = () => {
   if (study) {
     leaveStudy();
@@ -3173,7 +3184,7 @@ el.flip.onclick = () => { cancelBoardGesture(); state.flipped = !state.flipped; 
 el.sound.onclick = () => {
   state.sound = !state.sound;
   try { localStorage.setItem(SOUND_KEY, state.sound ? 'on' : 'off'); } catch { /* optional */ }
-  el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
+  scheduleRender();
 };
 el.engineToggle.onclick = () => {
   state.analysis = !state.analysis;
@@ -3181,14 +3192,14 @@ el.engineToggle.onclick = () => {
   scheduleRender();
 };
 function toggleOpt(name) {
-  state.opts[name] = !state.opts[name];
+  setOption(name, !state.opts[name]);
   saveOpts();
   scheduleRender();
 }
 el.bestToggle.onclick = () => toggleOpt('arrow');
 el.bestReview.onclick = () => {
   const index = BEST_REVIEW_MODES.indexOf(state.opts.bestReview);
-  state.opts.bestReview = BEST_REVIEW_MODES[(index + 1) % BEST_REVIEW_MODES.length];
+  setOption('bestReview', BEST_REVIEW_MODES[(index + 1) % BEST_REVIEW_MODES.length]);
   saveOpts();
   scheduleRender();
 };
@@ -3214,7 +3225,7 @@ el.worst.addEventListener('click', (e) => {
 el.settings.addEventListener('change', (e) => {
   const input = e.target.closest('[data-opt]');
   if (!input) return;
-  state.opts[input.dataset.opt] = input.type === 'checkbox' ? input.checked : +input.value;
+  setOption(input.dataset.opt, input.type === 'checkbox' ? input.checked : +input.value);
   saveOpts();
   renderedMoves.version = -1;  // redraw the move symbols
   scheduleRender();
@@ -3232,24 +3243,25 @@ document.addEventListener('keydown', (e) => {
     refreshBadgeExplanation();
     return;
   }
-  if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea, [contenteditable="true"]')) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input:not([type="checkbox"]), select, textarea, [contenteditable="true"]')) return;
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   const keys = {
-    ArrowLeft: () => $('prev').click(),
-    ArrowRight: () => $('next').click(),
-    Home: () => $('first').click(),
+    ArrowLeft: () => study ? goStudy(study.cursor - 1) : go(currentIndex() - 1, -1),
+    ArrowRight: () => study ? goStudy(study.cursor + 1) : go(currentIndex() + 1, 1),
+    Home: () => study ? goStudy(0) : go(0, 1),
     End: () => el.live.click(),
     f: () => el.flip.click(),
     m: () => el.sound.click(),
     e: () => el.engineToggle.click(),
     b: () => el.bestToggle.click(),
-    r: () => { if (!e.repeat) el.bestReview.click(); },
-    a: () => el.altToggle.click(),
+    a: () => el.bestReview.click(),
+    '2': () => el.altToggle.click(),
     t: () => el.tacticsToggle.click(),
     v: () => $('blindToggle').click(),
   };
-  if (keys[e.key]) {
+  if (keys[key]) {
     e.preventDefault();
-    keys[e.key]();
+    if (!e.repeat || key.length > 1) keys[key]();
   }
 });
 
@@ -3261,7 +3273,6 @@ setInterval(() => {
   }
 }, 100);
 
-el.sound.textContent = state.sound ? 'Sound on' : 'Sound off';
 initSections();
 initBoardUnit();
 initPanels();

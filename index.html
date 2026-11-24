@@ -11,17 +11,17 @@
 <body>
 <header class="top">
   <div class="controls board-controls" role="group" aria-label="Board controls">
-    <button id="first" title="First move (Home)">⏮</button>
-    <button id="prev" title="Previous move (←)">◀</button>
-    <button id="next" title="Next move (→)">▶</button>
     <button id="live" title="Back to live (End)">Live</button>
     <button id="studyToggle" type="button" aria-pressed="false" title="Try moves from this position">Study</button>
     <button id="flip" title="Flip board (F)">Flip</button>
-    <button id="sound" title="Move sound (M)">Sound on</button>
-    <button id="engineToggle" title="Stockfish analysis (E)">Engine on</button>
-    <button id="bestToggle" title="Show the engine's best move (B)">Best move</button>
-    <button id="bestReview" type="button" aria-keyshortcuts="R" title="Cycle post-move review for your moves (R)">BestReview · Disabled</button>
-    <button id="altToggle" title="Show the 2nd and 3rd best moves and what they cost (A)">2nd/3rd</button>
+    <button id="sound" title="Move sound (M)" aria-pressed="true">Sound</button>
+    <button id="engineToggle" title="Stockfish analysis (E)" aria-pressed="true">Engine</button>
+    <button id="bestToggle" aria-keyshortcuts="B" title="Show the engine's best move (B)">Best move</button>
+    <button id="bestReview" type="button" aria-keyshortcuts="A" aria-label="After · Disabled" title="After · Disabled (A)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5v5h5"/><path d="M3.5 10a9 9 0 1 1 1 7M12 7v5l3 2"/></svg>
+      <span aria-hidden="true">??</span>
+    </button>
+    <button id="altToggle" aria-keyshortcuts="2" title="Show the 2nd and 3rd best moves and what they cost (2)">2nd/3rd</button>
     <button id="tacticsToggle" title="Show position badges and tactical moves on the board (T). Pick which ones in Analysis settings.">Tactics</button>
     <button id="legendToggle" type="button" popovertarget="legend" hidden>Legend</button>
     <div id="legend" class="legend" popover>
@@ -46,7 +46,7 @@
   </div>
   <div class="top-actions">
     <button id="folderBtn" class="pickfolder" type="button" title="Review a game live from the newest .jsonl file in a folder">Watch folder…</button>
-    <button id="themeToggle" class="theme-toggle" type="button">Switch to dark mode</button>
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode">☾</button>
   </div>
 </header>
 
