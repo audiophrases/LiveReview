@@ -19,6 +19,7 @@ const ENGINE_KEY = 'livewatch.engine';
 const SOUND_KEY = 'livewatch.sound';
 const BLIND_KEY = 'livewatch.blind';
 const OPTS_KEY = 'livewatch.opts';
+const BEST_REVIEW_MODES = ['Disabled', 'All my moves', 'My blunders'];
 const SWEEP_DEPTH = 12;  // every position, two lines, for the move symbols
 const SWEEP_LINES = 2;
 const ANALYSABLE = ['standard', 'fromPosition', 'chess960'];
@@ -44,7 +45,7 @@ const el = {
   live: $('live'), flip: $('flip'), sound: $('sound'),
   studyToggle: $('studyToggle'), studyInfo: $('studyInfo'), studyLine: $('studyLine'), studyPromotion: $('studyPromotion'),
   folderBtn: $('folderBtn'), themeToggle: $('themeToggle'),
-  engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'),
+  engine: $('engine'), engineToggle: $('engineToggle'), bestToggle: $('bestToggle'), bestReview: $('bestReview'),
   altToggle: $('altToggle'), tacticsToggle: $('tacticsToggle'), subopts: $('tacticOpts'),
   legend: $('legend'), legendToggle: $('legendToggle'), worst: $('worst'), worstTitle: $('worstTitle'), tally: $('tally'),
   settings: $('settings'), boardwrap: document.querySelector('.boardwrap'),
@@ -67,7 +68,7 @@ const state = {
   blind: false,
   analysis: true,
   opts: {
-    bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true,
+    bar: true, arrow: true, alts: true, lines: true, symbols: true, worst: true, bestReview: 'Disabled',
     tactics: false, tMate: true, tUndefended: true, tPinned: true, tCheckable: true, tQueen: true, tCapture: false,
     tFork: true, tPin: true, tSkewer: true, tDiscovered: true, tPressure: true, tRemoval: true, tZwischen: true,
     threats: false, depth: 18, multipv: 3,
@@ -78,6 +79,7 @@ try {
   state.sound = localStorage.getItem(SOUND_KEY) !== 'off';
   const saved = JSON.parse(localStorage.getItem(OPTS_KEY) || '{}') || {};
   Object.assign(state.opts, saved);
+  if (!BEST_REVIEW_MODES.includes(state.opts.bestReview)) state.opts.bestReview = 'Disabled';
   // Carry the old arrow preferences into their replacement position badges.
   if (!('tUndefended' in saved) && ('tHanging' in saved || 'tTrade' in saved)) {
     state.opts.tUndefended = (saved.tHanging ?? true) || (saved.tTrade ?? true);
@@ -222,7 +224,8 @@ async function openGame(id, session, { quiet = false } = {}) {
       if (state.game !== game) return;
       if (obj.id && obj.players) {
         game.info = { ...game.info, ...obj };
-        state.orientation = obj.players.black?.user?.id === state.user.id ? 'black' : 'white';
+        const color = ['white', 'black'].find((side) => obj.players[side]?.user?.id === state.user.id);
+        applyPlayerColor(game, color);
         if (obj.status && !['created', 'started'].includes(obj.status.name ?? obj.status)) finish(game);
       } else if (obj.fen) {
         addPosition(game, obj);
@@ -755,6 +758,18 @@ function canAnalyse(game) {
   return state.analysis && !engine.failed && ANALYSABLE.includes(key);
 }
 
+function bestReviewActive() {
+  return !study && state.opts.bestReview !== 'Disabled';
+}
+
+function bestReviewPosition(idx) {
+  const game = state.game;
+  const prev = game?.plies[idx - 1];
+  if (!prev || !game.plies[idx]?.lm) return null;
+  const mover = prev.fen.split(' ')[1] === 'w' ? 'white' : 'black';
+  return mover === game.info?.playerColor ? prev : null;
+}
+
 function pumpEngine() {
   const game = state.game;
   const viewFen = viewedFen();
@@ -782,7 +797,14 @@ function pumpEngine() {
     });
   };
 
-  // The position on screen comes first, then a sweep back through the game.
+  // Finish the relevant move review before starting a longer search on the displayed board.
+  if (bestReviewActive()) {
+    const prev = bestReviewPosition(currentIndex());
+    if (prev && want(prev.fen, SWEEP_DEPTH, SWEEP_LINES)) return start(prev.fen, SWEEP_DEPTH, SWEEP_LINES);
+    if (prev && state.opts.bestReview === 'My blunders' && want(viewFen, SWEEP_DEPTH, SWEEP_LINES)) {
+      return start(viewFen, SWEEP_DEPTH, SWEEP_LINES);
+    }
+  }
   const { depth } = state.opts;
   const multipv = Math.max(state.opts.multipv, state.opts.alts ? 3 : 1);
   if (want(viewFen, depth, multipv)) return start(viewFen, depth, multipv);
@@ -1937,10 +1959,14 @@ function renderControls() {
   renderStudyControls();
   el.engineToggle.classList.toggle('on', state.analysis);
   el.engineToggle.textContent = state.analysis ? 'Engine on' : 'Engine off';
-  el.bestToggle.classList.toggle('on', state.opts.arrow);
-  el.bestToggle.disabled = !state.analysis;
-  el.altToggle.classList.toggle('on', state.opts.alts);
-  el.altToggle.disabled = !state.analysis;
+  const review = bestReviewActive();
+  el.bestReview.textContent = `BestReview · ${state.opts.bestReview}`;
+  el.bestReview.classList.toggle('on', state.opts.bestReview !== 'Disabled');
+  el.bestReview.disabled = !state.analysis;
+  el.bestToggle.classList.toggle('on', !review && state.opts.arrow);
+  el.bestToggle.disabled = !state.analysis || review;
+  el.altToggle.classList.toggle('on', !review && state.opts.alts);
+  el.altToggle.disabled = !state.analysis || review;
   el.tacticsToggle.classList.toggle('on', state.opts.tactics);
   el.legendToggle.hidden = !state.opts.tactics;
   if (el.legendToggle.hidden && el.legend.matches(':popover-open')) el.legend.hidePopover();
@@ -1953,7 +1979,8 @@ function renderControls() {
     const v = state.opts[input.dataset.opt];
     if (input.type === 'checkbox') input.checked = !!v;
     else input.value = String(v);
-    input.disabled = !state.analysis && !('noengine' in input.dataset);
+    input.disabled = (!state.analysis && !('noengine' in input.dataset)) ||
+      (review && ['arrow', 'alts', 'lines'].includes(input.dataset.opt));
   }
 }
 
@@ -1990,7 +2017,16 @@ function renderAnalysis(ply, idx) {
   // Best move, plus the runners-up labelled with how much they give away.
   const s = ply.fen.split(' ')[1] === 'w' ? 1 : -1;
   const arrows = [];
-  if (!t && best) {
+  const review = bestReviewActive();
+  const prev = review ? bestReviewPosition(idx) : null;
+  const prevEval = prev && evals.get(prev.fen);
+  const showReview = prevEval?.depth >= SWEEP_DEPTH && (opts.bestReview === 'All my moves' ||
+    ((t || e?.depth >= SWEEP_DEPTH) && classify(idx) === 'blunder'));
+  const reviewMove = showReview && prevEval.lines[0]?.pv[0];
+  if (reviewMove) {
+    arrows.push({ uci: castleFix(prev.fen, reviewMove), color: BEST_COLOR, width: 0.17, opacity: 0.8 });
+  }
+  if (!review && !t && best) {
     if (opts.alts) {
       for (const line of e.lines.slice(1, 3)) {
         if (line) arrows.push({ uci: line.pv[0], color: BEST_COLOR, width: 0.11, opacity: 0.5, label: dropLabel(best, line, s) });
@@ -2004,7 +2040,8 @@ function renderAnalysis(ply, idx) {
   const summary = t === 'draw' ? 'Stalemate' : t ? `Checkmate · ${t === 'w' ? 'Black' : 'White'} wins`
     : chances == null ? 'Thinking…' : `${describeAdvantage(chances)} (${fmtEval(best)})`;
   let html = `<div class="head"><span class="adv">${summary}</span><span>${t || !depth ? '' : `Stockfish 16 · depth ${depth}`}</span></div>`;
-  if (opts.lines && !t) {
+  if (reviewMove) html += `<div class="note">Best was <b>${esc(toSan(prev.fen, reviewMove))}</b>.</div>`;
+  if (!review && opts.lines && !t) {
     (e?.lines || []).slice(0, opts.multipv).forEach((line, j) => {
       if (!line) return;
       const drop = j && best ? `<span class="drop" title="Compared with the best move">${dropLabel(best, line, s)}</span>` : '';
@@ -2023,7 +2060,7 @@ function renderAnalysis(ply, idx) {
       const bad = ['inaccuracy', 'mistake', 'blunder'].includes(kind);
       html += `<div class="note"><span class="sym k-${kind}">${KINDS[kind].sym}</span> ` +
         `<b>${esc(ply.san || ply.lm)}</b> is ${kind === 'best' ? 'the best move' : `${/^[aeiou]/i.test(KINDS[kind].word) ? 'an' : 'a'} ${KINDS[kind].word.toLowerCase()}`}` +
-        (bad && betterSan ? `. Best was <b>${esc(betterSan)}</b> (${fmtEval(better)}).` : '.') + '</div>';
+        (!review && bad && betterSan ? `. Best was <b>${esc(betterSan)}</b> (${fmtEval(better)}).` : '.') + '</div>';
     }
   }
   el.engine.innerHTML = html;
@@ -2059,7 +2096,7 @@ function blunderCard(i, idx) {
     `<span><span class="sym k-blunder">${KINDS.blunder.sym}</span> <b>${esc(moveLabel(i))}</b></span>` +
     `<span class="muted">${esc(name)}</span>` +
     `<span>${evalText(prev.fen)} → ${evalText(cur.fen)}</span>` +
-    (better ? `<span class="muted">Best was <b>${esc(toSan(prev.fen, better.pv[0]))}</b></span>` : '') +
+    (better && !bestReviewActive() ? `<span class="muted">Best was <b>${esc(toSan(prev.fen, better.pv[0]))}</b></span>` : '') +
     '</span></button>';
 }
 
@@ -3149,6 +3186,12 @@ function toggleOpt(name) {
   scheduleRender();
 }
 el.bestToggle.onclick = () => toggleOpt('arrow');
+el.bestReview.onclick = () => {
+  const index = BEST_REVIEW_MODES.indexOf(state.opts.bestReview);
+  state.opts.bestReview = BEST_REVIEW_MODES[(index + 1) % BEST_REVIEW_MODES.length];
+  saveOpts();
+  scheduleRender();
+};
 el.altToggle.onclick = () => toggleOpt('alts');
 el.tacticsToggle.onclick = () => toggleOpt('tactics');
 function applyBlind() {
@@ -3189,7 +3232,7 @@ document.addEventListener('keydown', (e) => {
     refreshBadgeExplanation();
     return;
   }
-  if (e.target.closest('input, select')) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea, [contenteditable="true"]')) return;
   const keys = {
     ArrowLeft: () => $('prev').click(),
     ArrowRight: () => $('next').click(),
@@ -3199,6 +3242,7 @@ document.addEventListener('keydown', (e) => {
     m: () => el.sound.click(),
     e: () => el.engineToggle.click(),
     b: () => el.bestToggle.click(),
+    r: () => { if (!e.repeat) el.bestReview.click(); },
     a: () => el.altToggle.click(),
     t: () => el.tacticsToggle.click(),
     v: () => $('blindToggle').click(),

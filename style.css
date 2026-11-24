@@ -462,7 +462,7 @@ a { color: var(--accent); }
 .settings { font-size: 13px; }
 .settings label { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
 .settings select { margin-left: auto; font: inherit; padding: 1px 4px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
-.controls #bestToggle.on { background: #2f7fd8; border-color: #2f7fd8; color: #fff; }
+.controls #bestToggle.on, .controls #bestReview.on { background: #2f7fd8; border-color: #2f7fd8; color: #fff; }
 .controls button:disabled { opacity: 0.5; cursor: default; }
 
 /* ---------- alternatives, tactics, blunder previews ---------- */
