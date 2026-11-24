@@ -1965,7 +1965,7 @@ function render() {
 
 function renderControls() {
   const game = state.game;
-  el.top.classList.toggle('auto-hide', Boolean(game?.plies.length && !game.over));
+  el.top.classList.toggle('auto-hide', Boolean(game?.plies.length));
   el.live.classList.toggle('on', !study && state.view == null);
   renderStudyControls();
   el.sound.classList.toggle('on', state.sound);
