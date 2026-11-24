@@ -1975,7 +1975,7 @@ function renderControls() {
   const reviewLabel = `After · ${state.opts.bestReview}`;
   el.bestReview.setAttribute('aria-label', reviewLabel);
   el.bestReview.title = `${reviewLabel} (A)`;
-  el.bestReview.classList.toggle('on', state.opts.bestReview === 'All my moves');
+  el.bestReview.classList.toggle('on', state.opts.bestReview !== 'Disabled');
   el.bestReview.classList.toggle('blunder', state.opts.bestReview === 'My blunders');
   el.bestReview.disabled = !state.analysis;
   el.bestToggle.classList.toggle('on', state.opts.arrow);
